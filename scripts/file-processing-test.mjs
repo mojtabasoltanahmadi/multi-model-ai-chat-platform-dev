@@ -53,6 +53,14 @@ async function api(method, path, { token, body } = {}) {
   return { status: response.status, json };
 }
 
+async function fetchRaw(token, path) {
+  const response = await fetch(`${BASE}${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  const buffer = Buffer.from(await response.arrayBuffer());
+  return { status: response.status, headers: response.headers, buffer };
+}
+
 async function upload(token, conversationId, { buffer, name, type }) {
   const form = new FormData();
   form.append('file', new Blob([buffer], { type }), name);
@@ -670,6 +678,60 @@ async function main() {
     crossConversationChat.status === 400,
     String(crossConversationChat.status),
   );
+
+  // ---- content preview / download ----
+  const ownContent = await fetchRaw(tokenA, `/files/${pdfFileId}/content`);
+  check(
+    'owner can fetch the stored object with its real bytes',
+    ownContent.status === 200 &&
+      ownContent.buffer.length > 0 &&
+      ownContent.buffer.subarray(0, 5).toString('latin1') === '%PDF-',
+    `${ownContent.status} (${ownContent.buffer.length} bytes)`,
+  );
+  check(
+    'preview is served inline with a non-guessable MIME and nosniff',
+    ownContent.headers.get('content-type') === 'application/pdf' &&
+      (ownContent.headers.get('content-disposition') ?? '').startsWith('inline;') &&
+      ownContent.headers.get('x-content-type-options') === 'nosniff',
+    `${ownContent.headers.get('content-type')} / ${ownContent.headers.get('content-disposition')}`,
+  );
+  check(
+    'the storage key is never exposed in the response headers',
+    !JSON.stringify([...ownContent.headers.entries()]).includes('files/'),
+  );
+
+  const forcedDownload = await fetchRaw(tokenA, `/files/${pdfFileId}/content?download=1`);
+  const disposition = forcedDownload.headers.get('content-disposition') ?? '';
+  check(
+    'download=1 forces an attachment carrying the original name',
+    disposition.startsWith('attachment;') && disposition.includes('report'),
+    disposition,
+  );
+
+  const pngContent = await fetchRaw(tokenA, `/files/${pngUpload.json.id}/content`);
+  check(
+    'images are served inline for thumbnails',
+    pngContent.status === 200 && (pngContent.headers.get('content-disposition') ?? '').startsWith('inline;'),
+    String(pngContent.status),
+  );
+
+  const xlsxContent = await fetchRaw(tokenA, `/files/${xlsxUpload.json.id}/content`);
+  check(
+    'non-previewable types are always downloads',
+    xlsxContent.status === 200 &&
+      (xlsxContent.headers.get('content-disposition') ?? '').startsWith('attachment;'),
+    String(xlsxContent.status),
+  );
+
+  const foreignContent = await fetchRaw(tokenB, `/files/${pdfFileId}/content`);
+  check(
+    "user B cannot read user A's file bytes (404)",
+    foreignContent.status === 404,
+    String(foreignContent.status),
+  );
+
+  const anonymousContent = await fetchRaw(null, `/files/${pdfFileId}/content`);
+  check('anonymous access to file bytes is rejected (401)', anonymousContent.status === 401, String(anonymousContent.status));
 
   const nonAdminAdmin = await api('GET', '/admin/files', { token: tokenA });
   check('normal user cannot read the admin file view (403)', nonAdminAdmin.status === 403, String(nonAdminAdmin.status));
