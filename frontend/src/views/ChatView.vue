@@ -5,17 +5,21 @@ import ChatHeader from '../components/chat/ChatHeader.vue';
 import EmptyChat from '../components/chat/EmptyChat.vue';
 import MessageItem from '../components/chat/MessageItem.vue';
 import MessageComposer from '../components/chat/MessageComposer.vue';
+import FileViewerModal from '../components/chat/FileViewerModal.vue';
 import AppSkeleton from '../components/ui/AppSkeleton.vue';
 import {
   api,
+  describeLocalFileProblem,
   fetchChatFile,
   fetchConversationFiles,
+  fetchFileContent,
   streamChatMessage,
   reconnectGenerationStream,
   uploadConversationFile,
   type StreamHandle,
 } from '../api/client';
 import type { AiModel, ChatFile, Conversation, Message } from '../api/types';
+import { isImageFile } from '../utils/fileKind';
 import { useToast } from '../composables/useToast';
 import { useOnline } from '../composables/useOnline';
 
@@ -43,7 +47,14 @@ const error = ref('');
  */
 const attachments = ref<ChatFile[]>([]);
 const filesById = ref<Record<string, ChatFile>>({});
-const uploading = ref(false);
+/** Files currently being uploaded by THIS tab (they cannot be sent yet). */
+const uploadingCount = ref(0);
+/** Object URLs for image thumbnails, keyed by file id (local or server). */
+const previews = ref<Record<string, string>>({});
+/** In-flight thumbnail fetches, so a chip never triggers two downloads. */
+const previewFetches = new Map<string, Promise<void>>();
+/** File opened in the viewer modal (null = closed). */
+const viewerFile = ref<ChatFile | null>(null);
 let attachmentPoller: number | null = null;
 
 /** Formats the accepted-file hint without duplicating the backend limit. */
@@ -135,7 +146,10 @@ onMounted(async () => {
   }
 });
 
-onBeforeUnmount(() => stopAttachmentPolling());
+onBeforeUnmount(() => {
+  stopAttachmentPolling();
+  releasePreviews();
+});
 
 // Connectivity returned: re-attach any row whose live feed a transport drop
 // severed this session (internet disconnect mid-stream). The generation kept
@@ -194,6 +208,7 @@ async function loadMessages() {
     messages.value = [];
     attachments.value = [];
     filesById.value = {};
+    releasePreviews();
     stopAttachmentPolling();
     return;
   }
@@ -229,6 +244,9 @@ function startNewConversation() {
   if (streaming.value) return;
   activeId.value = null;
   messages.value = [];
+  attachments.value = [];
+  viewerFile.value = null;
+  releasePreviews();
 }
 
 // ---- file attachments ----
@@ -270,8 +288,25 @@ function attachmentsFor(message: Message): ChatFile[] {
     .filter((file): file is ChatFile => Boolean(file));
 }
 
-async function attachFile(file: File) {
+/**
+ * Uploads one or more files chosen in a single picker session. Every accepted
+ * file shows up as a chip (with an image thumbnail) immediately, so the upload
+ * is visible while it runs, and the Send button stays disabled until the last
+ * transfer finishes. Processing afterwards does NOT block chat.
+ */
+async function attachFiles(files: File[]) {
   error.value = '';
+  if (files.length === 0) return;
+
+  // Obvious rejects never cost an upload; the backend re-validates everything.
+  const valid: File[] = [];
+  for (const file of files) {
+    const problem = describeLocalFileProblem(file);
+    if (problem) toast.error(`«${file.name}»: ${problem}`);
+    else valid.push(file);
+  }
+  if (valid.length === 0) return;
+
   try {
     if (!activeId.value) await createConversation();
   } catch (e) {
@@ -281,23 +316,141 @@ async function attachFile(file: File) {
   const conversationId = activeId.value;
   if (!conversationId) return;
 
-  uploading.value = true;
-  try {
-    const uploaded = await uploadConversationFile(conversationId, file);
-    if (conversationId !== activeId.value) return;
-    indexFiles([uploaded]);
-    attachments.value = [...attachments.value, uploaded];
-    ensureAttachmentPolling();
-  } catch (e) {
-    toast.error(e instanceof Error ? e.message : 'آپلود فایل ناموفق بود.');
-  } finally {
-    uploading.value = false;
-  }
+  // Local placeholders: the server id is not known until the upload returns.
+  const pending = valid.map((file) => makePendingAttachment(file, conversationId));
+  valid.forEach((file, index) => {
+    if (isImageFile({ originalName: file.name, mimeType: file.type })) {
+      previews.value = { ...previews.value, [pending[index].id]: URL.createObjectURL(file) };
+    }
+  });
+  attachments.value = [...attachments.value, ...pending];
+  uploadingCount.value += pending.length;
+
+  await Promise.allSettled(
+    valid.map(async (file, index) => {
+      const placeholder = pending[index];
+      try {
+        const uploaded = await uploadConversationFile(conversationId, file);
+        if (conversationId !== activeId.value) {
+          // The user moved on; the file is uploaded but no longer on screen.
+          revokePreview(placeholder.id);
+          return;
+        }
+        indexFiles([uploaded]);
+        adoptPreview(placeholder.id, uploaded.id);
+        attachments.value = attachments.value.map((item) =>
+          item.id === placeholder.id ? uploaded : item,
+        );
+        ensureAttachmentPolling();
+      } catch (e) {
+        removeAttachment(placeholder.id);
+        toast.error(e instanceof Error ? e.message : 'آپلود فایل ناموفق بود.');
+      } finally {
+        uploadingCount.value = Math.max(0, uploadingCount.value - 1);
+      }
+    }),
+  );
+}
+
+function makePendingAttachment(file: File, conversationId: string): ChatFile {
+  const now = new Date().toISOString();
+  return {
+    id: `local-${localId()}`,
+    userId: '',
+    conversationId,
+    originalName: file.name || 'بدون‌نام',
+    mimeType: file.type,
+    size: file.size,
+    status: 'UPLOADING',
+    errorMessage: null,
+    attempts: 0,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function localId(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
 }
 
 function removeAttachment(fileId: string) {
   attachments.value = attachments.value.filter((file) => file.id !== fileId);
+  revokePreview(fileId);
   ensureAttachmentPolling();
+}
+
+function clearAttachments() {
+  releasePreviews();
+  attachments.value = [];
+  stopAttachmentPolling();
+}
+
+// ---- thumbnails & viewer ----
+
+/** Object URL for a file's thumbnail, when one has been loaded already. */
+function previewFor(fileId: string): string | null {
+  return previews.value[fileId] ?? null;
+}
+
+/** Moves a local placeholder's thumbnail onto the server-assigned file id. */
+function adoptPreview(fromId: string, toId: string) {
+  const current = previews.value[fromId];
+  if (!current) return;
+  const next = { ...previews.value, [toId]: current };
+  delete next[fromId];
+  previews.value = next;
+}
+
+function revokePreview(fileId: string) {
+  const url = previews.value[fileId];
+  if (!url) return;
+  URL.revokeObjectURL(url);
+  const next = { ...previews.value };
+  delete next[fileId];
+  previews.value = next;
+}
+
+function releasePreviews() {
+  for (const url of Object.values(previews.value)) URL.revokeObjectURL(url);
+  previews.value = {};
+  previewFetches.clear();
+}
+
+/**
+ * Lazily fetches a thumbnail for an image that came from the server (sent in an
+ * earlier turn, or uploaded before a refresh). A thumbnail is a nicety: a
+ * failure leaves the static kind icon in place.
+ */
+async function ensureImagePreview(file: ChatFile) {
+  if (file.status !== 'READY' || !isImageFile(file)) return;
+  if (previews.value[file.id] || previewFetches.has(file.id)) return;
+  const task = (async () => {
+    try {
+      const blob = await fetchFileContent(file.id);
+      previews.value = { ...previews.value, [file.id]: URL.createObjectURL(blob) };
+    } catch {
+      /* keep the icon fallback */
+    } finally {
+      previewFetches.delete(file.id);
+    }
+  })();
+  previewFetches.set(file.id, task);
+  await task;
+}
+
+/**
+ * Opens the preview sheet for a file. Only `READY` files have content to show,
+ * so anything else answers with the reason instead of an empty viewer.
+ */
+function openFile(file: ChatFile) {
+  if (file.status !== 'READY') {
+    toast.error(`«${file.originalName}» هنوز آماده نیست.`);
+    return;
+  }
+  viewerFile.value = file;
+  void ensureImagePreview(file);
 }
 
 /** Polls only while something is still being processed. */
@@ -675,7 +828,10 @@ async function scrollToBottom(force = false) {
             :model-name="models.find((m) => m.id === message.modelId)?.name"
             :retry-disabled="streaming"
             :attachments="attachmentsFor(message)"
+            :previews="previews"
+            :request-preview="ensureImagePreview"
             @retry="retry"
+            @open-file="openFile"
           />
           <MessageItem
             v-if="streamingMessage"
@@ -691,13 +847,24 @@ async function scrollToBottom(force = false) {
         :model-id="selectedModelId"
         :streaming="streaming"
         :attachments="attachments"
-        :uploading="uploading"
+        :uploading-count="uploadingCount"
+        :previews="previews"
+        :request-preview="ensureImagePreview"
         :hint="activeId ? attachHint : 'ارسال اولین پیام، گفتگو را به‌صورت خودکار می‌سازد.'"
         @send="send"
         @stop="stopStreaming"
-        @attach="attachFile"
+        @attach="attachFiles"
         @remove-attachment="removeAttachment"
+        @clear-attachments="clearAttachments"
+        @open-file="openFile"
         @update:model-id="selectedModelId = $event"
+      />
+
+      <FileViewerModal
+        v-if="viewerFile"
+        :file="viewerFile"
+        :preview-url="previewFor(viewerFile.id)"
+        @close="viewerFile = null"
       />
     </main>
   </div>

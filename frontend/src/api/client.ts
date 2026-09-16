@@ -141,6 +141,54 @@ export function fetchChatFile(fileId: string): Promise<ChatFile> {
   return api<ChatFile>(`/files/${fileId}`);
 }
 
+/**
+ * Downloads the stored bytes of a file the caller owns (thumbnails, previews
+ * and downloads). The response is binary, so it bypasses `api()`; the JWT is
+ * required because MinIO itself is never exposed to the browser.
+ */
+export async function fetchFileContent(fileId: string): Promise<Blob> {
+  let response: Response;
+  try {
+    response = await fetch(`${BASE}/files/${fileId}/content`, { headers: authHeader() });
+  } catch {
+    throw new ApiError('دریافت فایل ممکن نشد. ارتباط با سرور برقرار نشد.');
+  }
+
+  if (response.status === 401 && loadSession()) {
+    clearSession();
+    sessionExpiredHandler?.();
+    throw new ApiError('نشست شما منقضی شده است. دوباره وارد شوید.');
+  }
+
+  if (!response.ok) {
+    let message = 'دریافت فایل ممکن نشد.';
+    try {
+      message = extractError(await response.json(), message);
+    } catch {
+      /* non-JSON error body — keep the fallback */
+    }
+    throw new ApiError(message);
+  }
+
+  return response.blob();
+}
+
+/**
+ * Client-side pre-check so an obviously rejected file never costs an upload.
+ * The backend stays the source of truth (size, signature and MIME are all
+ * re-validated server-side).
+ */
+export function describeLocalFileProblem(file: File): string | null {
+  if (file.size === 0) return 'فایل خالی است و قابل قبول نیست.';
+  if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
+    return `حجم فایل بیش از حد مجاز است (حداکثر ${MAX_FILE_SIZE_MB} مگابایت).`;
+  }
+  if (!/\.(pdf|xls|xlsx|png|jpe?g)$/i.test(file.name)) {
+    return 'فقط فایل PDF، Excel و تصویر (PNG/JPEG) قابل پیوست است.';
+  }
+  return null;
+}
+
 // ---- SSE streaming (fetch + ReadableStream; EventSource cannot POST with JWT) ----
 
 export interface StreamMetaPayload {

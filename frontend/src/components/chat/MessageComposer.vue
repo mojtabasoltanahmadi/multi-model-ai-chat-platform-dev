@@ -13,8 +13,12 @@ interface Props {
   streaming: boolean;
   /** Files attached to the next message (any lifecycle status). */
   attachments?: ChatFile[];
-  /** True while an upload is in flight. */
-  uploading?: boolean;
+  /** How many of the pending attachments are still uploading. */
+  uploadingCount?: number;
+  /** Object URLs for image thumbnails, keyed by file id. */
+  previews?: Record<string, string>;
+  /** Asks the view to fetch a thumbnail for a file restored from the server. */
+  requestPreview?: (file: ChatFile) => void;
   disabled?: boolean;
   /** Shown when no conversation is active — sending will create one. */
   hint?: string;
@@ -24,22 +28,38 @@ const props = withDefaults(defineProps<Props>(), {
   disabled: false,
   hint: '',
   attachments: () => [],
-  uploading: false,
+  uploadingCount: 0,
+  previews: () => ({}),
+  requestPreview: undefined,
 });
 const emit = defineEmits<{
   send: [content: string];
   stop: [];
   'update:modelId': [id: string];
-  attach: [file: File];
+  attach: [files: File[]];
   'remove-attachment': [fileId: string];
+  'clear-attachments': [];
+  'open-file': [file: ChatFile];
 }>();
 
 const draft = ref('');
 const textarea = ref<HTMLTextAreaElement | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
 
+const uploading = computed(() => props.uploadingCount > 0);
+
+/**
+ * An upload in flight is the one thing that must block Send: the files are not
+ * part of the conversation yet, so sending now would silently drop them. Files
+ * that are only *processing* server-side do not block anything — chat stays
+ * usable, and the message goes out with the files that are ready.
+ */
 const canSend = computed(
-  () => !props.disabled && !props.streaming && draft.value.trim().length > 0,
+  () =>
+    !props.disabled &&
+    !props.streaming &&
+    !uploading.value &&
+    draft.value.trim().length > 0,
 );
 
 /** Attachments that are usable as context right now. */
@@ -47,24 +67,19 @@ const readyAttachments = computed(() =>
   props.attachments.filter((file) => file.status === 'READY'),
 );
 
-/**
- * A file that is still processing is not silently dropped from the user's
- * view, but it also cannot be sent as context: the hint explains why the
- * message will go out without it.
- */
 const pendingAttachmentCount = computed(
   () => props.attachments.length - readyAttachments.value.length,
 );
 
-function pickFile() {
+function pickFiles() {
   fileInput.value?.click();
 }
 
-function onFileChosen(event: Event) {
+function onFilesChosen(event: Event) {
   const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (file) emit('attach', file);
-  // Reset so choosing the same file again still fires a change event.
+  const files = Array.from(input.files ?? []);
+  if (files.length > 0) emit('attach', files);
+  // Reset so choosing the same files again still fires a change event.
   input.value = '';
 }
 
@@ -100,45 +115,87 @@ defineExpose({ focus: () => textarea.value?.focus() });
   <div class="composer" :class="{ 'composer--disabled': disabled }">
     <div v-if="hint" class="composer__hint">{{ hint }}</div>
 
-    <!-- Attached files: visible from upload through processing to ready/failed. -->
-    <div v-if="attachments.length > 0" class="composer__attachments" aria-label="فایل‌های پیوست">
-      <FileChip
-        v-for="file in attachments"
-        :key="file.id"
-        :name="file.originalName"
-        :status="file.status"
-        :size="file.size"
-        :error-message="file.errorMessage"
-        removable
-        @remove="emit('remove-attachment', file.id)"
-      />
-      <span v-if="uploading" class="composer__attachment-note">در حال آپلود فایل…</span>
-      <span v-else-if="pendingAttachmentCount > 0" class="composer__attachment-note">
-        فایل‌های در حال پردازش پس از آماده شدن به پیام پیوست می‌شوند.
-      </span>
-    </div>
-
-    <div
-      class="composer__box"
-      :class="{ 'composer__box--streaming': streaming }"
+    <!--
+      Attachments live in their own tray ABOVE the input box, not inside it:
+      the previews are files the user is about to send, not part of the text.
+    -->
+    <section
+      v-if="attachments.length > 0"
+      class="tray"
+      aria-label="فایل‌های پیوست"
     >
+      <header class="tray__head">
+        <span class="tray__title">
+          پیوست‌ها
+          <span class="tray__count ltr">{{ attachments.length.toLocaleString('fa-IR') }}</span>
+        </span>
+        <button
+          type="button"
+          class="tray__clear"
+          :disabled="disabled"
+          @click="emit('clear-attachments')"
+        >
+          حذف همه
+        </button>
+      </header>
+
+      <div class="tray__items">
+        <FileChip
+          v-for="file in attachments"
+          :key="file.id"
+          :name="file.originalName"
+          :status="file.status"
+          :mime-type="file.mimeType"
+          :size="file.size"
+          :error-message="file.errorMessage"
+          :preview-url="previews[file.id] ?? null"
+          :request-preview="requestPreview ? () => requestPreview?.(file) : undefined"
+          :clickable="file.status === 'READY'"
+          removable
+          @open="emit('open-file', file)"
+          @remove="emit('remove-attachment', file.id)"
+        />
+      </div>
+
+      <p class="tray__note">
+        <template v-if="uploading">
+          <span class="tray__dot" aria-hidden="true"></span>
+          در حال آپلود
+          {{ uploadingCount.toLocaleString('fa-IR') }}
+          فایل — تا پایان آپلود امکان ارسال نیست.
+        </template>
+        <template v-else-if="pendingAttachmentCount > 0">
+          فایل‌های در حال پردازش پس از آماده شدن به پیام پیوست می‌شوند.
+        </template>
+        <template v-else>
+          روی فایل بزنید تا پیش‌نمایش را ببینید.
+        </template>
+      </p>
+    </section>
+
+    <div class="composer__box" :class="{ 'composer__box--streaming': streaming }">
       <input
         ref="fileInput"
         type="file"
         class="composer__file-input"
         :accept="ACCEPTED_FILE_TYPES"
         :disabled="disabled"
+        multiple
         aria-hidden="true"
         tabindex="-1"
-        @change="onFileChosen"
+        @change="onFilesChosen"
       />
+      <!--
+        Stays enabled during an upload: uploads are independent, so the user can
+        keep queueing files (and keep typing) while earlier ones transfer.
+      -->
       <button
         type="button"
         class="composer__attach"
-        :disabled="disabled || uploading"
+        :disabled="disabled"
         aria-label="پیوست فایل (PDF، Excel یا تصویر)"
-        title="پیوست فایل (PDF، Excel یا تصویر)"
-        @click="pickFile"
+        title="پیوست فایل — می‌توانید چند فایل را همزمان انتخاب کنید"
+        @click="pickFiles"
       >
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
           <path d="m21.4 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
@@ -182,7 +239,8 @@ defineExpose({ focus: () => textarea.value?.focus() });
           type="button"
           class="composer__send"
           :disabled="!canSend"
-          aria-label="ارسال پیام"
+          :aria-label="uploading ? 'تا پایان آپلود امکان ارسال نیست' : 'ارسال پیام'"
+          :title="uploading ? 'تا پایان آپلود امکان ارسال نیست' : 'ارسال پیام'"
           @click="send"
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -217,6 +275,80 @@ defineExpose({ focus: () => textarea.value?.focus() });
   text-align: center;
 }
 
+/* ---- attachment tray (outside the input box) ---- */
+.tray {
+  max-width: var(--chat-measure);
+  margin: 0 auto 0.55rem;
+  padding: 0.55rem 0.7rem 0.5rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+}
+
+.tray__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.45rem;
+}
+
+.tray__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.tray__count {
+  padding: 0 0.38rem;
+  border-radius: var(--radius-full);
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 0.66rem;
+}
+
+.tray__clear {
+  padding: 0.2rem 0.55rem;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-3);
+  font-size: 0.7rem;
+}
+
+.tray__clear:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text-1);
+}
+
+.tray__items {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.tray__note {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0.45rem 0 0;
+  font-size: 0.7rem;
+  color: var(--text-3);
+}
+
+.tray__dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: var(--info);
+  animation: status-pulse 1.1s var(--ease-in-out) infinite;
+}
+
 .composer__box {
   display: flex;
   align-items: flex-end;
@@ -240,20 +372,6 @@ defineExpose({ focus: () => textarea.value?.focus() });
 
 .composer--disabled .composer__box {
   opacity: 0.65;
-}
-
-.composer__attachments {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.4rem;
-  max-width: var(--chat-measure);
-  margin: 0 auto 0.45rem;
-}
-
-.composer__attachment-note {
-  font-size: 0.7rem;
-  color: var(--text-3);
 }
 
 .composer__file-input {
@@ -334,6 +452,7 @@ defineExpose({ focus: () => textarea.value?.focus() });
 .composer__send:disabled {
   background: var(--surface-3);
   color: var(--text-disabled);
+  cursor: not-allowed;
 }
 
 .composer__send--stop {
@@ -391,6 +510,17 @@ defineExpose({ focus: () => textarea.value?.focus() });
 @media (max-width: 640px) {
   .composer {
     padding: 0.5rem 0.9rem 0.8rem;
+  }
+
+  .tray {
+    border-radius: var(--radius-md);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tray__dot,
+  .composer__status-dot {
+    animation: none;
   }
 }
 </style>
