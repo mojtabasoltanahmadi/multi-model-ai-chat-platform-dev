@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import AppAvatar from '../ui/AppAvatar.vue';
+import FileChip from './FileChip.vue';
 import { renderMarkdown } from '../../utils/markdown';
 import { formatTime } from '../../utils/format';
-import type { Message } from '../../api/types';
+import type { ChatFile, Message } from '../../api/types';
 
 interface Props {
   message: Message;
@@ -19,12 +20,15 @@ interface Props {
   streaming?: boolean;
   /** Disable the Retry button (e.g. while another send is in flight). */
   retryDisabled?: boolean;
+  /** Files this user turn was sent with (resolved from attachedFileIds). */
+  attachments?: ChatFile[];
 }
 
 const props = withDefaults(defineProps<Props>(), {
   streaming: false,
   modelName: '',
   retryDisabled: false,
+  attachments: () => [],
 });
 
 const emit = defineEmits<{ retry: [message: Message] }>();
@@ -101,6 +105,18 @@ function retry() {
       }"
       :dir="isUser ? 'auto' : undefined"
     >
+      <!-- Files used as context for this user turn (persisted ids, resolved here). -->
+      <div v-if="isUser && attachments.length > 0" class="message__attachments">
+        <FileChip
+          v-for="file in attachments"
+          :key="file.id"
+          :name="file.originalName"
+          :status="file.status"
+          :size="file.size"
+          :error-message="file.errorMessage"
+        />
+      </div>
+
       <!-- eslint-disable-next-line vue/no-v-html — sanitized: markdown-it runs with html:false -->
       <div
         v-if="isUser"
@@ -210,6 +226,13 @@ function retry() {
 
 .message--user .message__body {
   max-width: min(46rem, 100%);
+}
+
+.message__attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.15rem;
 }
 
 .message__content--user {

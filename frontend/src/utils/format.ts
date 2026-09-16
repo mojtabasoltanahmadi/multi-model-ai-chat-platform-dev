@@ -35,3 +35,15 @@ export function formatDateTime(iso: string): string {
 export function formatFullDate(iso: string): string {
   return new Intl.DateTimeFormat('fa-IR', { dateStyle: 'medium' }).format(new Date(iso));
 }
+
+/** «۲٫۴ مگابایت» style size label for uploaded files. */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '۰';
+  const units = ['بایت', 'کیلوبایت', 'مگابایت', 'گیگابایت'];
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** exponent;
+  const formatted = new Intl.NumberFormat('fa-IR', {
+    maximumFractionDigits: exponent === 0 ? 0 : 1,
+  }).format(value);
+  return `${formatted} ${units[exponent]}`;
+}

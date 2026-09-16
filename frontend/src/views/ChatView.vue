@@ -1,13 +1,21 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AppSidebar from '../components/layout/AppSidebar.vue';
 import ChatHeader from '../components/chat/ChatHeader.vue';
 import EmptyChat from '../components/chat/EmptyChat.vue';
 import MessageItem from '../components/chat/MessageItem.vue';
 import MessageComposer from '../components/chat/MessageComposer.vue';
 import AppSkeleton from '../components/ui/AppSkeleton.vue';
-import { api, streamChatMessage, reconnectGenerationStream, type StreamHandle } from '../api/client';
-import type { AiModel, Conversation, Message } from '../api/types';
+import {
+  api,
+  fetchChatFile,
+  fetchConversationFiles,
+  streamChatMessage,
+  reconnectGenerationStream,
+  uploadConversationFile,
+  type StreamHandle,
+} from '../api/client';
+import type { AiModel, ChatFile, Conversation, Message } from '../api/types';
 import { useToast } from '../composables/useToast';
 import { useOnline } from '../composables/useOnline';
 
@@ -24,6 +32,22 @@ const models = ref<AiModel[]>([]);
 const selectedModelId = ref('');
 const drawerOpen = ref(false);
 const error = ref('');
+
+/**
+ * File attachments (Day 5-6).
+ *  - `attachments` are files waiting to be sent as context (composer chips).
+ *  - `filesById` is the conversation's file index, which resolves the ids
+ *    stored on historical user messages so a reload still renders them.
+ * Uploading is asynchronous: the response comes back UPLOADING/PROCESSING and
+ * the status is polled until READY/FAILED, while chat stays fully usable.
+ */
+const attachments = ref<ChatFile[]>([]);
+const filesById = ref<Record<string, ChatFile>>({});
+const uploading = ref(false);
+let attachmentPoller: number | null = null;
+
+/** Formats the accepted-file hint without duplicating the backend limit. */
+const attachHint = 'PDF، Excel یا تصویر — حداکثر ۱۰ مگابایت';
 
 /** Desktop collapse state (ChatGPT-style rail); persisted per machine. */
 const sidebarCollapsed = ref(readCollapsedPreference());
@@ -111,6 +135,8 @@ onMounted(async () => {
   }
 });
 
+onBeforeUnmount(() => stopAttachmentPolling());
+
 // Connectivity returned: re-attach any row whose live feed a transport drop
 // severed this session (internet disconnect mid-stream). The generation kept
 // running server-side, so the reconnect stream hands back a snapshot plus the
@@ -166,9 +192,15 @@ async function createConversation(): Promise<Conversation> {
 async function loadMessages() {
   if (!activeId.value) {
     messages.value = [];
+    attachments.value = [];
+    filesById.value = {};
+    stopAttachmentPolling();
     return;
   }
   messagesLoading.value = true;
+  // Files are loaded with the conversation so a refresh restores in-flight
+  // processing state (it is persisted server-side, never only in memory).
+  void loadConversationFiles();
   try {
     const result = await api<{ conversation: Conversation; messages: Message[] }>(
       `/conversations/${activeId.value}`,
@@ -199,6 +231,128 @@ function startNewConversation() {
   messages.value = [];
 }
 
+// ---- file attachments ----
+
+/** Indexes the conversation's files and resumes polling for unfinished ones. */
+async function loadConversationFiles() {
+  const conversationId = activeId.value;
+  if (!conversationId) return;
+  try {
+    const files = await fetchConversationFiles(conversationId);
+    if (conversationId !== activeId.value) return; // switched meanwhile
+    indexFiles(files);
+
+    // Restore unfinished uploads as composer chips so the user still sees the
+    // file that was processing when the page was reloaded (status came from
+    // the database, not from memory). READY files were already consumed by
+    // their message and are only used to label those chips.
+    const unfinished = files.filter(
+      (file) => file.status !== 'READY' && !attachments.value.some((a) => a.id === file.id),
+    );
+    attachments.value = [...attachments.value, ...unfinished];
+    ensureAttachmentPolling();
+  } catch {
+    /* the file index is a convenience — chat still works without it */
+  }
+}
+
+function indexFiles(files: ChatFile[]) {
+  const index = { ...filesById.value };
+  for (const file of files) index[file.id] = file;
+  filesById.value = index;
+}
+
+/** Files attached to a specific user message, resolved for chip rendering. */
+function attachmentsFor(message: Message): ChatFile[] {
+  if (!message.attachedFileIds?.length) return [];
+  return message.attachedFileIds
+    .map((id) => filesById.value[id])
+    .filter((file): file is ChatFile => Boolean(file));
+}
+
+async function attachFile(file: File) {
+  error.value = '';
+  try {
+    if (!activeId.value) await createConversation();
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : 'ساخت گفتگو ناموفق بود.');
+    return;
+  }
+  const conversationId = activeId.value;
+  if (!conversationId) return;
+
+  uploading.value = true;
+  try {
+    const uploaded = await uploadConversationFile(conversationId, file);
+    if (conversationId !== activeId.value) return;
+    indexFiles([uploaded]);
+    attachments.value = [...attachments.value, uploaded];
+    ensureAttachmentPolling();
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : 'آپلود فایل ناموفق بود.');
+  } finally {
+    uploading.value = false;
+  }
+}
+
+function removeAttachment(fileId: string) {
+  attachments.value = attachments.value.filter((file) => file.id !== fileId);
+  ensureAttachmentPolling();
+}
+
+/** Polls only while something is still being processed. */
+function ensureAttachmentPolling() {
+  const hasUnfinished = attachments.value.some(
+    (file) => file.status === 'UPLOADING' || file.status === 'PROCESSING',
+  );
+  if (hasUnfinished && attachmentPoller === null) {
+    attachmentPoller = window.setInterval(() => void refreshAttachments(), 2500);
+  } else if (!hasUnfinished) {
+    stopAttachmentPolling();
+  }
+}
+
+function stopAttachmentPolling() {
+  if (attachmentPoller !== null) window.clearInterval(attachmentPoller);
+  attachmentPoller = null;
+}
+
+/**
+ * Re-reads the status of attached files. A single failed poll (offline blip)
+ * is ignored: the next tick retries, and the state lives in the database.
+ */
+async function refreshAttachments() {
+  const pending = attachments.value.filter(
+    (file) => file.status === 'UPLOADING' || file.status === 'PROCESSING',
+  );
+  if (pending.length === 0) {
+    stopAttachmentPolling();
+    return;
+  }
+  const updated = await Promise.all(
+    pending.map(async (file) => {
+      try {
+        return await fetchChatFile(file.id);
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const changed = updated.filter((file): file is ChatFile => Boolean(file));
+  if (changed.length > 0) {
+    indexFiles(changed);
+    attachments.value = attachments.value.map(
+      (file) => changed.find((updatedFile) => updatedFile.id === file.id) ?? file,
+    );
+    for (const file of changed) {
+      if (file.status === 'FAILED') {
+        toast.error(`پردازش «${file.originalName}» ناموفق بود.`);
+      }
+    }
+  }
+  ensureAttachmentPolling();
+}
+
 // ---- sending / streaming ----
 /**
  * Generates a client-side idempotency token. Format: `<prefix>-<base36 ts>-<rand>`.
@@ -214,7 +368,7 @@ function newClientMessageId(): string {
 
 async function send(
   content: string,
-  options: { clientMessageId?: string; existingUserRowId?: string } = {},
+  options: { clientMessageId?: string; existingUserRowId?: string; fileIds?: string[] } = {},
 ) {
   if (streaming.value) return;
   error.value = '';
@@ -237,6 +391,12 @@ async function send(
   // A new send supersedes any pending network-recovery attachment.
   networkRecoveryRowId.value = null;
 
+  // Only READY files may be sent as context; anything still processing stays
+  // attached for the next message (the backend re-checks and would 400).
+  const fileIds =
+    options.fileIds ??
+    attachments.value.filter((file) => file.status === 'READY').map((file) => file.id);
+
   const optimisticUser: Message = {
     id: `local-${clientMessageId}`,
     conversationId,
@@ -246,6 +406,9 @@ async function send(
     errorMessage: null,
     modelId: null,
     clientMessageId,
+    // Files used for this turn, so the chips show immediately (the persisted
+    // row returns the same ids via the meta event).
+    attachedFileIds: fileIds.length > 0 ? fileIds : null,
     createdAt: new Date().toISOString(),
   };
   const placeholder: Message = {
@@ -257,6 +420,7 @@ async function send(
     errorMessage: null,
     modelId: null,
     clientMessageId: null,
+    attachedFileIds: null,
     createdAt: new Date().toISOString(),
   };
   // A retry (manual or auto) reuses the user row already on screen — pushing
@@ -278,12 +442,18 @@ async function send(
     streamHandle.value = null;
     activeStreamRowId.value = null;
     inflightClientMessageId.value = null;
+    // Sent files are now part of the message; only unfinished ones stay
+    // attached for the next turn.
+    if (fileIds.length > 0) {
+      attachments.value = attachments.value.filter((file) => file.status !== 'READY');
+      ensureAttachmentPolling();
+    }
     void loadConversations(); // refresh titles and ordering
   };
 
   streamHandle.value = streamChatMessage(
     conversationId,
-    { content, modelId: selectedModelId.value || undefined, clientMessageId },
+    { content, modelId: selectedModelId.value || undefined, clientMessageId, fileIds },
     {
       onMeta: (meta) => {
         const optimistic = messages.value.find((m) => m.id === optimisticUser.id);
@@ -504,6 +674,7 @@ async function scrollToBottom(force = false) {
             :message="message"
             :model-name="models.find((m) => m.id === message.modelId)?.name"
             :retry-disabled="streaming"
+            :attachments="attachmentsFor(message)"
             @retry="retry"
           />
           <MessageItem
@@ -519,9 +690,13 @@ async function scrollToBottom(force = false) {
         :models="models"
         :model-id="selectedModelId"
         :streaming="streaming"
-        :hint="activeId ? '' : 'ارسال اولین پیام، گفتگو را به‌صورت خودکار می‌سازد.'"
+        :attachments="attachments"
+        :uploading="uploading"
+        :hint="activeId ? attachHint : 'ارسال اولین پیام، گفتگو را به‌صورت خودکار می‌سازد.'"
         @send="send"
         @stop="stopStreaming"
+        @attach="attachFile"
+        @remove-attachment="removeAttachment"
         @update:model-id="selectedModelId = $event"
       />
     </main>
