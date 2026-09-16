@@ -190,8 +190,8 @@ onMounted(() => {
       v-if="removable"
       type="button"
       class="file-chip__remove"
-      :aria-label="`حذف پیوست ${name}`"
-      :title="`حذف پیوست ${name}`"
+      :aria-label="`حذف فایل ${name}`"
+      :title="`حذف فایل ${name}`"
       @click="$emit('remove')"
     >
       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">

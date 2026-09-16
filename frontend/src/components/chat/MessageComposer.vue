@@ -11,9 +11,9 @@ interface Props {
   models: AiModel[];
   modelId: string;
   streaming: boolean;
-  /** Files attached to the next message (any lifecycle status). */
+  /** Files added to the next message (any lifecycle status). */
   attachments?: ChatFile[];
-  /** How many of the pending attachments are still uploading. */
+  /** How many of those files are still uploading. */
   uploadingCount?: number;
   /** Object URLs for image thumbnails, keyed by file id. */
   previews?: Record<string, string>;
@@ -38,7 +38,6 @@ const emit = defineEmits<{
   'update:modelId': [id: string];
   attach: [files: File[]];
   'remove-attachment': [fileId: string];
-  'clear-attachments': [];
   'open-file': [file: ChatFile];
 }>();
 
@@ -48,27 +47,19 @@ const fileInput = ref<HTMLInputElement | null>(null);
 
 const uploading = computed(() => props.uploadingCount > 0);
 
+/** Files whose content already exists, so they can carry a message on their own. */
+const readyAttachments = computed(() => props.attachments.filter((file) => file.status === 'READY'));
+
 /**
- * An upload in flight is the one thing that must block Send: the files are not
- * part of the conversation yet, so sending now would silently drop them. Files
- * that are only *processing* server-side do not block anything — chat stays
- * usable, and the message goes out with the files that are ready.
+ * A file on its own is enough to send: an upload in flight is the only thing
+ * that blocks the button, because those files are not in the conversation yet.
  */
 const canSend = computed(
   () =>
     !props.disabled &&
     !props.streaming &&
     !uploading.value &&
-    draft.value.trim().length > 0,
-);
-
-/** Attachments that are usable as context right now. */
-const readyAttachments = computed(() =>
-  props.attachments.filter((file) => file.status === 'READY'),
-);
-
-const pendingAttachmentCount = computed(
-  () => props.attachments.length - readyAttachments.value.length,
+    (draft.value.trim().length > 0 || readyAttachments.value.length > 0),
 );
 
 function pickFiles() {
@@ -116,30 +107,23 @@ defineExpose({ focus: () => textarea.value?.focus() });
     <div v-if="hint" class="composer__hint">{{ hint }}</div>
 
     <!--
-      Attachments live in their own tray ABOVE the input box, not inside it:
-      the previews are files the user is about to send, not part of the text.
+      Files live INSIDE the input box, right where the user types: they are part
+      of the message being written, so the box grows to hold them.
     -->
-    <section
-      v-if="attachments.length > 0"
-      class="tray"
-      aria-label="فایل‌های پیوست"
-    >
-      <header class="tray__head">
-        <span class="tray__title">
-          پیوست‌ها
-          <span class="tray__count ltr">{{ attachments.length.toLocaleString('fa-IR') }}</span>
-        </span>
-        <button
-          type="button"
-          class="tray__clear"
-          :disabled="disabled"
-          @click="emit('clear-attachments')"
-        >
-          حذف همه
-        </button>
-      </header>
+    <div class="composer__box" :class="{ 'composer__box--streaming': streaming }">
+      <input
+        ref="fileInput"
+        type="file"
+        class="composer__file-input"
+        :accept="ACCEPTED_FILE_TYPES"
+        :disabled="disabled"
+        multiple
+        aria-hidden="true"
+        tabindex="-1"
+        @change="onFilesChosen"
+      />
 
-      <div class="tray__items">
+      <div v-if="attachments.length > 0" class="composer__files" aria-label="فایل‌های افزوده‌شده">
         <FileChip
           v-for="file in attachments"
           :key="file.id"
@@ -157,97 +141,72 @@ defineExpose({ focus: () => textarea.value?.focus() });
         />
       </div>
 
-      <p class="tray__note">
-        <template v-if="uploading">
-          <span class="tray__dot" aria-hidden="true"></span>
-          در حال آپلود
-          {{ uploadingCount.toLocaleString('fa-IR') }}
-          فایل — تا پایان آپلود امکان ارسال نیست.
-        </template>
-        <template v-else-if="pendingAttachmentCount > 0">
-          فایل‌های در حال پردازش پس از آماده شدن به پیام پیوست می‌شوند.
-        </template>
-        <template v-else>
-          روی فایل بزنید تا پیش‌نمایش را ببینید.
-        </template>
-      </p>
-    </section>
-
-    <div class="composer__box" :class="{ 'composer__box--streaming': streaming }">
-      <input
-        ref="fileInput"
-        type="file"
-        class="composer__file-input"
-        :accept="ACCEPTED_FILE_TYPES"
-        :disabled="disabled"
-        multiple
-        aria-hidden="true"
-        tabindex="-1"
-        @change="onFilesChosen"
-      />
-      <!--
-        Stays enabled during an upload: uploads are independent, so the user can
-        keep queueing files (and keep typing) while earlier ones transfer.
-      -->
-      <button
-        type="button"
-        class="composer__attach"
-        :disabled="disabled"
-        aria-label="پیوست فایل (PDF، Excel یا تصویر)"
-        title="پیوست فایل — می‌توانید چند فایل را همزمان انتخاب کنید"
-        @click="pickFiles"
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
-          <path d="m21.4 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-        </svg>
-      </button>
-
-      <textarea
-        ref="textarea"
-        v-model="draft"
-        class="composer__input"
-        rows="1"
-        :maxlength="MAX_LENGTH"
-        :disabled="disabled"
-        placeholder="پیام خود را بنویسید… (Shift + Enter برای خط جدید)"
-        aria-label="متن پیام"
-        @keydown="onKeydown"
-      ></textarea>
-
-      <div class="composer__side">
-        <ModelSelector
-          :models="models"
-          :model-id="modelId"
-          placement="up"
-          compact
-          @update:model-id="emit('update:modelId', $event)"
-        />
+      <div class="composer__row">
         <button
-          v-if="streaming"
           type="button"
-          class="composer__send composer__send--stop"
-          aria-label="توقف تولید پاسخ"
-          title="توقف تولید پاسخ"
-          @click="emit('stop')"
+          class="composer__attach"
+          :disabled="disabled"
+          aria-label="افزودن فایل (PDF، Excel یا تصویر)"
+          title="افزودن فایل — می‌توانید چند فایل را همزمان انتخاب کنید"
+          @click="pickFiles"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <rect x="6" y="6" width="12" height="12" rx="2" />
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+            <path d="m21.4 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
           </svg>
         </button>
-        <button
-          v-else
-          type="button"
-          class="composer__send"
-          :disabled="!canSend"
-          :aria-label="uploading ? 'تا پایان آپلود امکان ارسال نیست' : 'ارسال پیام'"
-          :title="uploading ? 'تا پایان آپلود امکان ارسال نیست' : 'ارسال پیام'"
-          @click="send"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 19V5m-7 7 7-7 7 7" />
-          </svg>
-        </button>
+
+        <textarea
+          ref="textarea"
+          v-model="draft"
+          class="composer__input"
+          rows="1"
+          :maxlength="MAX_LENGTH"
+          :disabled="disabled"
+          placeholder="پیام خود را بنویسید… (Shift + Enter برای خط جدید)"
+          aria-label="متن پیام"
+          @keydown="onKeydown"
+        ></textarea>
+
+        <div class="composer__side">
+          <ModelSelector
+            :models="models"
+            :model-id="modelId"
+            placement="up"
+            compact
+            @select="emit('update:modelId', $event)"
+          />
+          <button
+            v-if="streaming"
+            type="button"
+            class="composer__send composer__send--stop"
+            aria-label="توقف تولید پاسخ"
+            title="توقف تولید پاسخ"
+            @click="emit('stop')"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <rect x="6" y="6" width="12" height="12" rx="2" />
+            </svg>
+          </button>
+          <button
+            v-else
+            type="button"
+            class="composer__send"
+            :disabled="!canSend"
+            :aria-label="uploading ? 'تا پایان آپلود امکان ارسال نیست' : 'ارسال پیام'"
+            :title="uploading ? 'تا پایان آپلود امکان ارسال نیست' : 'ارسال پیام'"
+            @click="send"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 19V5m-7 7 7-7 7 7" />
+            </svg>
+          </button>
+        </div>
       </div>
+
+      <p v-if="uploading" class="composer__busy">
+        <span class="composer__busy-dot" aria-hidden="true"></span>
+        در حال آپلود فایل… تا پایان آپلود امکان ارسال نیست.
+      </p>
     </div>
 
     <div class="composer__under">
@@ -275,84 +234,9 @@ defineExpose({ focus: () => textarea.value?.focus() });
   text-align: center;
 }
 
-/* ---- attachment tray (outside the input box) ---- */
-.tray {
-  max-width: var(--chat-measure);
-  margin: 0 auto 0.55rem;
-  padding: 0.55rem 0.7rem 0.5rem;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-1);
-}
-
-.tray__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin-bottom: 0.45rem;
-}
-
-.tray__title {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--text-2);
-}
-
-.tray__count {
-  padding: 0 0.38rem;
-  border-radius: var(--radius-full);
-  background: var(--surface-3);
-  color: var(--text-2);
-  font-size: 0.66rem;
-}
-
-.tray__clear {
-  padding: 0.2rem 0.55rem;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-sm);
-  color: var(--text-3);
-  font-size: 0.7rem;
-}
-
-.tray__clear:hover:not(:disabled) {
-  background: var(--surface-3);
-  color: var(--text-1);
-}
-
-.tray__items {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.tray__note {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  margin: 0.45rem 0 0;
-  font-size: 0.7rem;
-  color: var(--text-3);
-}
-
-.tray__dot {
-  width: 0.4rem;
-  height: 0.4rem;
-  border-radius: 50%;
-  background: var(--info);
-  animation: status-pulse 1.1s var(--ease-in-out) infinite;
-}
-
 .composer__box {
   display: flex;
-  align-items: flex-end;
-  gap: 0.45rem;
+  flex-direction: column;
   max-width: var(--chat-measure);
   margin-inline: auto;
   padding: 0.5rem 0.55rem;
@@ -372,6 +256,42 @@ defineExpose({ focus: () => textarea.value?.focus() });
 
 .composer--disabled .composer__box {
   opacity: 0.65;
+}
+
+/* The file row sits above the text row, inside the box. */
+.composer__files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.1rem 0.15rem 0.45rem;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 0.35rem;
+}
+
+.composer__row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.composer__busy {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0.4rem 0 0;
+  padding-inline-start: 0.35rem;
+  font-size: 0.7rem;
+  color: var(--text-3);
+}
+
+.composer__busy-dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: var(--info);
+  animation: status-pulse 1.1s var(--ease-in-out) infinite;
 }
 
 .composer__file-input {
@@ -511,14 +431,10 @@ defineExpose({ focus: () => textarea.value?.focus() });
   .composer {
     padding: 0.5rem 0.9rem 0.8rem;
   }
-
-  .tray {
-    border-radius: var(--radius-md);
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tray__dot,
+  .composer__busy-dot,
   .composer__status-dot {
     animation: none;
   }

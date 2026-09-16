@@ -57,8 +57,14 @@ const previewFetches = new Map<string, Promise<void>>();
 const viewerFile = ref<ChatFile | null>(null);
 let attachmentPoller: number | null = null;
 
-/** Formats the accepted-file hint without duplicating the backend limit. */
-const attachHint = 'PDF، Excel یا تصویر — حداکثر ۱۰ مگابایت';
+/**
+ * Text used when the user sends files without writing anything. The backend
+ * requires non-blank content, and an empty prompt would give the model nothing
+ * to act on, so a neutral instruction stands in for the missing draft.
+ */
+function defaultFilePrompt(fileCount: number): string {
+  return fileCount > 1 ? 'این فایل‌ها را بررسی کن.' : 'این فایل را بررسی کن.';
+}
 
 /** Desktop collapse state (ChatGPT-style rail); persisted per machine. */
 const sidebarCollapsed = ref(readCollapsedPreference());
@@ -381,12 +387,6 @@ function removeAttachment(fileId: string) {
   ensureAttachmentPolling();
 }
 
-function clearAttachments() {
-  releasePreviews();
-  attachments.value = [];
-  stopAttachmentPolling();
-}
-
 // ---- thumbnails & viewer ----
 
 /** Object URL for a file's thumbnail, when one has been loaded already. */
@@ -550,11 +550,16 @@ async function send(
     options.fileIds ??
     attachments.value.filter((file) => file.status === 'READY').map((file) => file.id);
 
+  // A file on its own is a complete message — no text required.
+  const messageContent =
+    content.trim() || (fileIds.length > 0 ? defaultFilePrompt(fileIds.length) : '');
+  if (!messageContent) return;
+
   const optimisticUser: Message = {
     id: `local-${clientMessageId}`,
     conversationId,
     role: 'user',
-    content,
+    content: messageContent,
     status: null,
     errorMessage: null,
     modelId: null,
@@ -606,7 +611,12 @@ async function send(
 
   streamHandle.value = streamChatMessage(
     conversationId,
-    { content, modelId: selectedModelId.value || undefined, clientMessageId, fileIds },
+    {
+      content: messageContent,
+      modelId: selectedModelId.value || undefined,
+      clientMessageId,
+      fileIds,
+    },
     {
       onMeta: (meta) => {
         const optimistic = messages.value.find((m) => m.id === optimisticUser.id);
@@ -736,9 +746,12 @@ function retry(message: Message) {
   // The user row stays on screen (existingUserRowId suppresses the optimistic
   // duplicate); reusing its clientMessageId makes the backend treat this as a
   // replay — one user row, one fresh assistant row.
+  // The turn's own attachments, not the composer's pending files: retrying a
+  // failed answer must not quietly drop the files it was asked about.
   void send(userRow.content, {
     clientMessageId: userRow.clientMessageId ?? undefined,
     existingUserRowId: userRow.id,
+    fileIds: userRow.attachedFileIds ?? [],
   });
 }
 
@@ -850,12 +863,11 @@ async function scrollToBottom(force = false) {
         :uploading-count="uploadingCount"
         :previews="previews"
         :request-preview="ensureImagePreview"
-        :hint="activeId ? attachHint : 'ارسال اولین پیام، گفتگو را به‌صورت خودکار می‌سازد.'"
+        :hint="activeId ? '' : 'ارسال اولین پیام، گفتگو را به‌صورت خودکار می‌سازد.'"
         @send="send"
         @stop="stopStreaming"
         @attach="attachFiles"
         @remove-attachment="removeAttachment"
-        @clear-attachments="clearAttachments"
         @open-file="openFile"
         @update:model-id="selectedModelId = $event"
       />
