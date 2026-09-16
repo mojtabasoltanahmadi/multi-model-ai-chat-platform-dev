@@ -24,6 +24,16 @@ export class AllExceptionsFilter implements ExceptionFilter {
     if (exception instanceof HttpException) {
       const status = exception.getStatus();
       const body = exception.getResponse();
+      // Multer aborts oversized uploads (413) before any handler runs, so the
+      // message is mapped here to stay consistent with the API's Persian
+      // error convention.
+      if (status === HttpStatus.PAYLOAD_TOO_LARGE) {
+        response.status(status).json({
+          statusCode: status,
+          message: 'حجم فایل بیش از حد مجاز است.',
+        });
+        return;
+      }
       response.status(status).json(
         typeof body === 'string' ? { message: body } : body,
       );
