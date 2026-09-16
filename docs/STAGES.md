@@ -453,3 +453,56 @@ Goal: attach PDF / Excel / image files to a conversation, with the heavy work
 - No download/preview endpoint: files are AI context, not attachments to fetch.
 - Real OCR rather than a fake success path; if OCR cannot run, the file fails with a
   reason (verified in this environment before committing to the library).
+
+## Stage 14 — File preview, downloads and multi-upload UX
+
+Follow-up round on the Stage 13 feature, driven by a client request: pick several files at once,
+keep typing during an upload (but not send), see images as images, and click any attachment
+afterwards to open it over a dimmed/blurred page with a download option and a close ×.
+
+**Backend**
+- `GET /files/:fileId/content` — owner-only byte stream (404 for foreign files and for a row whose
+  object is missing, 401 unauthenticated). `FileStorageService.getStream()` pipes the object
+  without buffering it, images/PDF are `inline` and everything else (or `?download=1`) is an
+  `attachment`, and the response carries `nosniff`, the validated MIME, the real size and an
+  RFC 5987 `filename*` so Persian names survive. No storage key or bucket URL is ever exposed.
+- `content-disposition.ts` + spec: the ASCII fallback is stripped of quotes, backslashes and
+  control characters so a hostile filename cannot break the header open.
+
+**Frontend**
+- Multi-select attach with concurrent uploads; every file becomes a chip immediately, with an
+  image thumbnail drawn from the local `File` (`URL.createObjectURL`, rekeyed onto the server id
+  when the upload returns, revoked when the chip goes away).
+- Pending files moved into their own **tray above** the input box (count, «حذف همه», hint line).
+- Send is disabled exactly while an upload is in flight («تا پایان آپلود امکان ارسال نیست»);
+  typing and adding more files stay enabled, and processing files never block sending.
+- `FileViewerModal.vue`: blurred backdrop, image or embedded PDF, kind badge, size, download
+  button and a danger × close (Esc + click-outside too, body scroll locked, focus restored).
+  Thumbnails for files restored from the server are fetched lazily through the content API.
+- Fixed a latent RTL bug found while reviewing the screenshot: the attachment row inherited
+  `dir="auto"` from the message body, so a Latin filename flipped the chips to LTR (wrong order,
+  wrong edge). The row is now explicitly RTL.
+
+**Verification**
+- backend jest 169/169, `tsc --noEmit` clean
+- `scripts/file-processing-test.mjs` 51/51 (8 new content checks: owner bytes, inline/attachment
+  disposition, `nosniff`, no key leak, foreign 404, anonymous 401)
+- `scripts/smoke-test.mjs` 75/75 (Day 1–4 regression unchanged)
+- Frontend verified in the real app through the browser preview, not by reading code: two files
+  injected through the hidden picker produced two chips; during a 3.7 MB upload the Send button
+  was `disabled` with the explanation label and the tray read «در حال آپلود ۱ فایل»; after the
+  upload it re-enabled while a file was still processing; the sent message kept both chips with
+  the image thumbnail; clicking the image chip opened the viewer (blur visible in the screenshot,
+  `blob:` document loaded with HTTP 200, no console errors), Esc and the × both closed it and
+  released the scroll lock; a reload restored the chips and re-fetched the thumbnail; the mock
+  model's answer quoted the OCR text («HELLO») and the PDF sentence, proving the context path.
+  `vue-tsc --noEmit` clean; production build clean.
+
+**Decisions**
+- Bytes are proxied through the API rather than presigned URLs (ownership stays in one place,
+  MinIO stays private).
+- The viewer only opens for `READY` files; anything else answers with a toast instead of an
+  empty frame.
+- Non-renderable types (Excel) get the download path with an explanation — no Office renderer.
+- The attach button stays enabled during an upload (uploads are independent); only Send is
+  gated, because only Send can lose data.

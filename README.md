@@ -64,19 +64,22 @@ The Vite dev server proxies `/api` to `http://localhost:4000`, so no CORS setup 
      `baseUrl`, and `apiKey`)
 3. The first active model automatically becomes the default.
 4. Register a normal user, create a conversation, and chat — responses stream in live.
-5. Attach a PDF, Excel file or image with the 📎 button. The chip shows «در حال آپلود…» →
-   «در حال پردازش…» → «آماده», and the file becomes usable as context once it is ready.
-   Chat stays fully usable while a file is processing.
+5. Attach files with the 📎 button — it accepts several at once. Each one becomes a chip in the
+   tray above the input («در حال آپلود…» → «در حال پردازش…» → «آماده»); image chips show their
+   thumbnail. Send is disabled only while an upload is in flight (you can keep typing, and chat
+   stays fully usable while a file is processing).
+6. Click a ready chip — on a sent message too — to open it: the image or PDF appears over a
+   blurred backdrop with a download button and a close × (Esc works).
 
 ## Tests
 
 ```bash
 cd backend
-npx jest                             # 162 unit tests (no database or services needed)
+npx jest                             # 169 unit tests (no database or services needed)
 
 # with the backend + postgres + redis + minio running:
 node ../scripts/smoke-test.mjs       # 75 end-to-end HTTP checks (Day 1-4 regression)
-node ../scripts/file-processing-test.mjs   # 43 file upload/processing checks (Day 5-6)
+node ../scripts/file-processing-test.mjs   # 51 file upload/processing/preview checks (Day 5-6)
 ```
 
 ## Documentation
@@ -116,8 +119,11 @@ node ../scripts/file-processing-test.mjs   # 43 file upload/processing checks (D
 - The file worker runs inside the backend process (a separate worker deployment is future work)
 - OCR is CPU-bound and single-language (`OCR_LANGUAGE`, default `eng`); scanned PDFs are not
   OCR-ed (a PDF with no text layer fails rather than being rasterized)
-- No file preview or download endpoint, no antivirus scanning, and no extracted-text view in
-  the admin panel (admins see status, size, type and the safe error reason)
+- File bytes are proxied through the API (owner-checked) instead of presigned storage URLs, so
+  previews and downloads stream via the backend
+- The viewer shows images inline and embeds PDFs; other types download rather than render. No
+  antivirus scanning, and no extracted-text view in the admin panel (admins see status, size,
+  type and the safe error reason)
 - File status updates are polled by the UI, not pushed
 - No regenerate-message action (requires a backend regenerate endpoint)
 - No rate limiting or observability stack — none are needed yet

@@ -111,6 +111,7 @@ MinIO.
 | POST | `/conversations/:conversationId/files` | `multipart/form-data`, field `file`. Returns **201** with the safe file shape. Foreign conversation → 404. No extraction happens here. |
 | GET | `/conversations/:conversationId/files` | files of a conversation (for reload/refresh restore) |
 | GET | `/files/:fileId` | single file status — the polling endpoint |
+| GET | `/files/:fileId/content?download=1` | owner-only bytes: inline for images/PDF (thumbnails, preview), attachment for everything else or with `download=1` |
 | GET | `/admin/files?status=&limit=&offset=` | admin only; status counts + paginated rows |
 | GET | `/admin/files/stats` | admin only; row counts + live queue depth |
 | POST | `/admin/files/:fileId/reprocess` | admin only; `READY`/`FAILED` → `PROCESSING` and a fresh job |
@@ -123,6 +124,29 @@ consumed server-side when building the AI prompt.
 Sending a message with attachments adds `fileIds: string[]` (≤ 5, uuids) to the existing
 `POST /conversations/:id/messages` body; the persisted user message stores them in
 `messages.attached_file_ids` (jsonb) so the UI can re-render the chips after a reload.
+
+## Frontend UX
+
+- **Multi-select upload.** The composer's 📎 button opens the picker with `multiple`: one
+  gesture can queue several files. Each accepted file becomes a chip immediately (with an
+  image thumbnail drawn from the local `File`), and uploads run concurrently.
+- **Send is blocked while an upload is in flight** — the files are not in the conversation yet,
+  so sending would silently drop them. The user can keep typing, keep adding files, and the
+  button explains itself («تا پایان آپلود امکان ارسال نیست»). Files that are merely *processing*
+  never block chat: the message goes out with the ready ones and the rest stay attached for the
+  next turn.
+- **Attachments live in a tray above the input box**, not inside it: the previews are files
+  about to be sent, not message text. The tray has a count, «حذف همه» and a hint line.
+- **Image thumbnails.** Image chips show the picture itself (locally for a fresh upload, or
+  fetched lazily through the content endpoint for files restored from the server). A thumbnail
+  failure degrades to the static kind icon — it is never an error state.
+- **Click to preview.** A `READY` chip opens a viewer: blurred backdrop, the image large or the
+  PDF embedded, header with kind/name/size, a download button and a close × (Esc and
+  click-outside also close). Non-previewable types (Excel) get the download path with an
+  explanation instead of an empty frame. Only `READY` files are clickable — anything else gives
+  a toast explaining that it is not ready yet.
+- **Refresh-safe.** Chips on historical messages are rebuilt from `attached_file_ids` resolved
+  against the conversation's file list, so a reload never loses an attachment (or its status).
 
 ## Queue & worker
 
@@ -291,18 +315,24 @@ operational view.
   and the sweeper recovers the work on the next boot.
 - OCR is CPU-bound and single-language by default; no OCR quality tuning, no rotation/deskew.
 - No antivirus/malware scanning, no image dimension limits beyond the file-size cap.
-- No presigned download endpoint and no file preview — files are context, not attachments to
-  download.
-- No extracted-text management UI (admins see status, size, error — not content).
+- Preview/download is proxied through the API (owner-checked) rather than presigned MinIO
+  URLs, so large files stream through the backend instead of straight from storage.
+- No extracted-text management UI (admins see status, size, error — not content), and the
+  admin file view has no preview action (it would need its own authorization decision).
+- The viewer renders what the browser can: PDF and images inline, everything else as a download.
+  No in-app Office/spreadsheet rendering, no zoom/rotate tools, no multi-file carousel.
 - Polling (not push) for status updates on the frontend.
 - Scanned PDFs are not OCR-ed (a PDF with no text layer fails rather than rasterizing pages).
 
 ## Verification
 
-- `backend`: 162 unit tests (`npx jest`) — validation, state machine, extraction (real PDF +
+- `backend`: 169 unit tests (`npx jest`) — validation, state machine, extraction (real PDF +
   real xlsx + mocked OCR), processor (idempotency, permanent vs transient, retry exhaustion,
-  sweeper), upload/ownership/context rules, and the Day 1–4 suites.
-- `scripts/file-processing-test.mjs` — 43 end-to-end checks against a live stack (upload PDF /
+  sweeper), upload/ownership/context rules, `Content-Disposition` hardening, content-stream
+  authorization, and the Day 1–4 suites.
+- `scripts/file-processing-test.mjs` — 51 end-to-end checks against a live stack (upload PDF /
   Excel / image → READY, corrupt file → FAILED, validation, cross-user denial, admin view,
-  reprocess, refresh recovery, and chat while a file is still `PROCESSING`).
+  reprocess, refresh recovery, chat while a file is still `PROCESSING`, and the preview/download
+  contract: owner bytes, inline vs attachment disposition, `nosniff`, no storage key in the
+  response, foreign/anonymous denial).
 - `scripts/smoke-test.mjs` — the Day 1–4 regression suite, 75/75 green after this feature.
