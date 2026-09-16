@@ -110,6 +110,12 @@ function goAdmin() {
   void router.push({ name: 'admin-models' });
 }
 
+function goAdminFiles() {
+  profileOpen.value = false;
+  emit('close');
+  void router.push({ name: 'admin-files' });
+}
+
 function onLogout() {
   profileOpen.value = false;
   emit('close');
@@ -262,6 +268,19 @@ function onCreate() {
                 <rect x="14" y="14" width="7" height="7" rx="1.5" />
               </svg>
               مدیریت مدل‌ها
+            </button>
+            <button
+              v-if="auth.isAdmin.value"
+              type="button"
+              class="sidebar__menu-item"
+              role="menuitem"
+              @click="goAdminFiles"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
+                <path d="M14 3v5h5" />
+              </svg>
+              وضعیت پردازش فایل‌ها
             </button>
             <button type="button" class="sidebar__menu-item sidebar__menu-item--exit" role="menuitem" @click="onLogout">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
