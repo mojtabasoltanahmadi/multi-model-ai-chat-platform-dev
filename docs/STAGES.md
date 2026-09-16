@@ -506,3 +506,49 @@ afterwards to open it over a dimmed/blurred page with a download option and a cl
 - Non-renderable types (Excel) get the download path with an explanation — no Office renderer.
 - The attach button stays enabled during an upload (uploads are independent); only Send is
   gated, because only Send can lose data.
+
+## Stage 15 — Composer feedback round (files inside the input, file-only sends)
+
+Client feedback on the Stage 14 UI: stop repeating the allowed types and the size cap, stop
+printing the word «پیوست», put the chips inside the chat input rather than in a separate tray,
+and let a chosen file be sent on its own — with the send button locked only while a file is
+actually loading.
+
+**Changes**
+- The `PDF / Excel / تصویر — حداکثر ۱۰ مگابایت` hint is gone from the composer; the allowed
+  types and size cap are enforced by the backend, which answers with a clear Persian error.
+- The attachment tray (title, count badge, «حذف همه», explanatory lines) is gone. Files now
+  render in a row **inside** the composer box with a hairline separator and per-chip ×; the
+  only added line is the upload notice («در حال آپلود فایل… تا پایان آپلود امکان ارسال نیست»).
+- Words containing «پیوست» were removed from the visible UI (the chip's clear button now says
+  «حذف فایل»). Remaining uses are accessible/aria names only, plus the backend's own error copy.
+- **File-only send:** the button unlocks as soon as the draft is non-empty *or* a `READY` file is
+  present. With an empty draft the UI sends a neutral instruction («این فایل را بررسی کن.» /
+  «این فایل‌ها را بررسی کن.») rather than relaxing the backend's non-blank content rule, so
+  history and the auto-generated title stay meaningful.
+
+**Real bugs found while verifying in the browser**
+- **The model selector never worked.** `ModelSelector` emits `select`, but both call sites
+  (`ChatHeader`, `MessageComposer`) listened for `update:model-id`, so choosing a model silently
+  did nothing — in the header and in the composer. Fixed both bindings and confirmed the pill and
+  the header now follow the selection. (Stage 10 shipped the feature with API tests only; the UI
+  wiring had never been exercised in a browser.)
+- **Retrying a failed answer dropped its files.** `retry()` re-sent the user row without
+  `fileIds`, and the `send()` fallback looked at the composer's pending files (empty by then), so
+  a retry asked the model about nothing. It now resends the row's own `attachedFileIds`.
+
+**Verification (browser, not code reading)**
+- Two files injected through the hidden picker rendered as chips **inside** the composer box
+  (`box.contains(filesRow) === true`), one with a live image thumbnail, while the box showed
+  «در حال آپلود…» and the send button was disabled with `aria-label="تا پایان آپلود امکان ارسال نیست"`.
+- After the upload, Send was enabled with an **empty draft**; clicking it produced the user turn
+  «این فایل‌ها را بررسی کن.» with both chips (thumbnail included) and persisted them.
+- No visible occurrence of «۱۰ مگابایت» or «پیوست» remains in the composer (the only match on
+  the page was the model's own earlier answer text).
+- Model switch verified: selecting `gpt` in the composer moved both the pill and the header pill
+  to `gpt`; a retry afterwards streamed a mock answer.
+- Retry-with-files verified at runtime by capturing the request body: it contained
+  `fileIds: [<2 ids>]` with the original `clientMessageId` (replay), where it previously carried
+  no files at all.
+- `vue-tsc --noEmit` clean; production build clean. Backend untouched this round (169/169 still
+  green from Stage 14; the file E2E and Day 1–4 regression are unaffected by UI-only edits).

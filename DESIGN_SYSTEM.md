@@ -255,11 +255,11 @@ Used in sidebar, chat header (mobile), auth brand panel, empty chat, admin heade
   rejects unsupported/oversized files locally before upload, and accepts new files even while
   an earlier upload runs. Send is disabled only during an upload — the user keeps typing, and
   a processing file never blocks the message.
-* `chat/AttachmentTray` (inside `MessageComposer.vue`) — the pending files live in their own
-  surface (radius-lg, `--surface-2`, subtle border, shadow-1) **above** the input box, never
-  inside it: previews are files about to be sent, not message text. Header row carries the
-  count badge + «حذف همه»; chips wrap below; the hint line reports the upload count or explains
-  that processing files join the next message.
+* File row (inside `MessageComposer.vue`) — the files being written into the message render
+  **inside the composer box**, in a wrapping row above the text row, separated by a hairline
+  (`--border-subtle`): the box grows to hold them instead of the chips living in a second
+  surface. No title, count, badge or explanatory copy — the chips speak for themselves and each
+  carries its own ×; the only extra line is the upload notice while a transfer is running.
 * `chat/FileChip.vue` — one file: thumbnail (`--radius-sm`, 2.5rem, `object-fit: cover`) for
   images, otherwise a kind icon (document / sheet / image, inline SVG), an ellipsized name, an
   `LTR` size and a status affordance — pulsing spinner «در حال آپلود…» / «در حال پردازش…», check
@@ -543,13 +543,23 @@ Reason:   The same four states already exist for models (active/inactive/free) a
 Date:     2026-09-16
 Affected: FileChip.vue, FileTable.vue.
 
-Decision: Pending attachments sit in their own tray above the composer, not inside the input box
-Reason:   Chips inside the rounded input read as part of the message text and compete with the
-          textarea for the same visual container. A separate surface makes "files I am about to
-          send" a distinct object, gives the count and «حذف همه» a natural home, and lets the
-          input keep its minimal single-row shape.
+Decision: Pending files render inside the composer box, in a row above the text row
+Reason:   A file chosen for the message being written belongs to that message, so it grows the
+          same box instead of a second surface the user has to read as a separate object. The
+          row is separated by a hairline rather than a panel, carries no label or counter
+          (the chips say what they are), and each chip removes itself — so the box stays the
+          single place a message is composed.
 Date:     2026-09-16
 Affected: MessageComposer.vue.
+
+Decision: A ready file alone can be sent, with a neutral instruction standing in for the draft
+Reason:   Requiring text before the button unlocks invents friction the product does not need
+          ("analyze this file" is the obvious intent of attaching one). The backend still
+          requires non-blank content, so the UI supplies «این فایل را بررسی کن.» / «این فایل‌ها
+          را بررسی کن.» instead of relaxing an invariant the whole chat path depends on, and
+          the recorded message stays self-explanatory in history and in the conversation title.
+Date:     2026-09-16
+Affected: MessageComposer.vue, ChatView.vue.
 
 Decision: Send is disabled while an upload is in flight, but never while a file is processing
 Reason:   An uploading file is not in the conversation yet, so sending would drop it silently —

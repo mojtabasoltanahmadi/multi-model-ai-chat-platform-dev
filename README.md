@@ -64,10 +64,10 @@ The Vite dev server proxies `/api` to `http://localhost:4000`, so no CORS setup 
      `baseUrl`, and `apiKey`)
 3. The first active model automatically becomes the default.
 4. Register a normal user, create a conversation, and chat — responses stream in live.
-5. Attach files with the 📎 button — it accepts several at once. Each one becomes a chip in the
-   tray above the input («در حال آپلود…» → «در حال پردازش…» → «آماده»); image chips show their
-   thumbnail. Send is disabled only while an upload is in flight (you can keep typing, and chat
-   stays fully usable while a file is processing).
+5. Add files with the 📎 button — it accepts several at once, and they appear as chips inside the
+   input box («در حال آپلود…» → «در حال پردازش…» → «آماده»); image chips show their thumbnail.
+   You can send with a file alone (no text). Send is disabled only while an upload is in flight —
+   you keep typing, and chat stays fully usable while a file is processing.
 6. Click a ready chip — on a sent message too — to open it: the image or PDF appears over a
    blurred backdrop with a download button and a close × (Esc works).
 

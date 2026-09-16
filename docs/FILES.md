@@ -135,8 +135,16 @@ Sending a message with attachments adds `fileIds: string[]` (≤ 5, uuids) to th
   button explains itself («تا پایان آپلود امکان ارسال نیست»). Files that are merely *processing*
   never block chat: the message goes out with the ready ones and the rest stay attached for the
   next turn.
-- **Attachments live in a tray above the input box**, not inside it: the previews are files
-  about to be sent, not message text. The tray has a count, «حذف همه» and a hint line.
+- **A ready file alone can be sent** — no text required. The backend still requires non-blank
+  content, so the UI sends a neutral instruction («این فایل را بررسی کن.») when the draft is
+  empty, which keeps history and the auto-generated conversation title meaningful.
+- **Files render inside the composer box**, in their own wrapping row above the text row: the
+  box grows to hold them, each chip removes itself with its ×, and no counter/label copy is
+  shown. Allowed types and the size cap are not repeated in the UI — the backend is the source
+  of truth and a rejected file comes back as a clear Persian message.
+- **Retrying a failed answer keeps that turn's files** (`attachedFileIds` of the user row are
+  resent with the same idempotency token), so a retry never quietly drops the attachments it was
+  asked about.
 - **Image thumbnails.** Image chips show the picture itself (locally for a fresh upload, or
   fetched lazily through the content endpoint for files restored from the server). A thumbnail
   failure degrades to the static kind icon — it is never an error state.
