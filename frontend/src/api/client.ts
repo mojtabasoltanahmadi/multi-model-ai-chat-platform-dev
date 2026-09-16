@@ -1,6 +1,6 @@
 import type { AiModel, AuthResponse, Message, SendMessagePayload } from './types';
 
-const BASE = '/api';
+const BASE = 'http://localhost:4000/api';
 const TOKEN_KEY = 'hooshyar.token';
 const USER_KEY = 'hooshyar.user';
 

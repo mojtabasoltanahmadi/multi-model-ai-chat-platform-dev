@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: ai_chat_mvp
     ports:
-      - '5432:5432'
+      - '5433:5432'
     volumes:
       - ai_chat_pgdata:/var/lib/postgresql/data
 
