@@ -1,4 +1,4 @@
-# Optional: a local PostgreSQL for development.
+# Local development infrastructure for the AI Chat MVP.
 # Usage: docker compose -f infra/docker-compose.yml up -d
 services:
   db:
@@ -12,5 +12,37 @@ services:
     volumes:
       - ai_chat_pgdata:/var/lib/postgresql/data
 
+  # Object storage for uploaded files (Day 5-6 feature).
+  # Credentials are local dev defaults — override via env in any real deployment.
+  minio:
+    # quay.io is used because Docker Hub pulls of minio/minio failed in this
+    # environment; the image is identical.
+    image: quay.io/minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - ai_chat_minio:/data
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 5s
+      timeout: 5s
+      retries: 6
+
+  # Queue broker for BullMQ (file processing) — Day 5-6 feature.
+  redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '6379:6379'
+    volumes:
+      - ai_chat_redis:/data
+
 volumes:
   ai_chat_pgdata:
+  ai_chat_minio:
+  ai_chat_redis:
