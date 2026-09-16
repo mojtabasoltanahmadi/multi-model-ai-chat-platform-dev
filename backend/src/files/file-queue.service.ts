@@ -19,6 +19,20 @@ export class FileQueueService implements FileJobQueue {
   constructor(@InjectQueue(FILE_PROCESSING_QUEUE) private readonly queue: Queue) {}
 
   async enqueueProcessing(fileId: string): Promise<void> {
+    // A terminal job with this id would make BullMQ silently IGNORE the add
+    // below, leaving the row PROCESSING with no job behind it (a stuck state).
+    // Clear terminal jobs first, then dedupe against live ones as usual.
+    const existing = await this.queue.getJob(fileId);
+    if (existing) {
+      const state = await existing.getState();
+      if (state === 'completed' || state === 'failed') {
+        await existing.remove().catch(() => undefined);
+      } else {
+        // waiting / active / delayed: a live job already covers this file.
+        return;
+      }
+    }
+
     await this.queue.add(
       'process',
       { fileId },
