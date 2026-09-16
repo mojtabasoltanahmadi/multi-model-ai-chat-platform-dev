@@ -7,6 +7,7 @@ import { MessagesController } from './messages.controller';
 import { ConversationsModule } from '../conversations/conversations.module';
 import { ModelsModule } from '../models/models.module';
 import { AiModule } from '../ai/ai.module';
+import { FilesModule } from '../files/files.module';
 
 @Module({
   imports: [
@@ -14,6 +15,9 @@ import { AiModule } from '../ai/ai.module';
     ConversationsModule,
     ModelsModule,
     AiModule,
+    // Attached-file context: only READY files of the same conversation are
+    // ever resolved (FilesService enforces both conditions).
+    FilesModule,
   ],
   controllers: [MessagesController],
   providers: [MessagesService, GenerationRegistry],

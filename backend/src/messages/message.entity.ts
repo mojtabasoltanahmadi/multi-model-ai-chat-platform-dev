@@ -81,6 +81,15 @@ export class Message {
   @Column({ name: 'client_message_id', type: 'varchar', length: 64, nullable: true })
   clientMessageId: string | null;
 
+  /**
+   * File ids this user message attached as AI context (null on assistant
+   * rows). Only READY files are ever stored here; the ids let a refreshed
+   * client render the attachment chips and lets a retry rebuild the same
+   * context. The extracted text itself is never duplicated into the message.
+   */
+  @Column({ name: 'attached_file_ids', type: 'jsonb', nullable: true })
+  attachedFileIds: string[] | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 }
