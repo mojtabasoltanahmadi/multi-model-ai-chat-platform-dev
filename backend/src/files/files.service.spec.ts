@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 import type { ConfigService } from '@nestjs/config';
 import type { Repository } from 'typeorm';
 import { File, FileStatus } from './file.entity';
@@ -90,6 +91,7 @@ function setup({
     buildStorageKey: jest.fn(() => 'files/user-1/conv-1/generated.pdf'),
     putBuffer: jest.fn().mockResolvedValue(undefined),
     getBuffer: jest.fn().mockResolvedValue(Buffer.from('%PDF-1.4')),
+    getStream: jest.fn().mockResolvedValue(Readable.from([Buffer.from('%PDF-1.4')])),
     remove: jest.fn().mockResolvedValue(undefined),
   };
 
@@ -337,6 +339,35 @@ describe('FilesService — explicit reprocess', () => {
   it('404s for an unknown file', async () => {
     const { service } = setup({ existing: null });
     await expect(service.reprocess('admin-1', 'missing')).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('FilesService — content stream (preview/download)', () => {
+  it('streams the object for the owner', async () => {
+    const { service, storage } = setup({ existing: makeStoredFile({ status: 'READY' }) });
+
+    const result = await service.getContent('user-1', 'file-1');
+
+    expect(result.file.id).toBe('file-1');
+    expect(storage.getStream).toHaveBeenCalledWith('files/user-1/conv-1/key.pdf');
+    const chunks: Buffer[] = [];
+    for await (const chunk of result.stream) chunks.push(chunk as Buffer);
+    expect(Buffer.concat(chunks).toString()).toBe('%PDF-1.4');
+  });
+
+  it('404s for a foreign file and never touches storage', async () => {
+    // getOwned filters by userId in the query, so a foreign id returns null.
+    const { service, storage } = setup({ existing: null });
+
+    await expect(service.getContent('user-2', 'file-1')).rejects.toMatchObject({ status: 404 });
+    expect(storage.getStream).not.toHaveBeenCalled();
+  });
+
+  it('404s (and logs) when the row exists but the object is gone', async () => {
+    const { service, storage } = setup({ existing: makeStoredFile({ status: 'READY' }) });
+    storage.getStream.mockRejectedValueOnce(new Error('NoSuchKey'));
+
+    await expect(service.getContent('user-1', 'file-1')).rejects.toMatchObject({ status: 404 });
   });
 });
 

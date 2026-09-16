@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Client as MinioClient } from 'minio';
+import type { Readable } from 'node:stream';
 
 /**
  * Object storage facade over MinIO. One small service so the rest of the
@@ -60,12 +61,20 @@ export class FileStorageService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getBuffer(key: string): Promise<Buffer> {
-    const stream = await this.client.getObject(this.bucket, key);
     const chunks: Buffer[] = [];
-    for await (const chunk of stream) {
+    for await (const chunk of await this.getStream(key)) {
       chunks.push(chunk as Buffer);
     }
     return Buffer.concat(chunks);
+  }
+
+  /**
+   * Pipes an object without buffering it in memory. Used by the owner-only
+   * content endpoint; a missing object rejects, and the caller must not have
+   * flushed any response yet.
+   */
+  async getStream(key: string): Promise<Readable> {
+    return this.client.getObject(this.bucket, key);
   }
 
   async remove(key: string): Promise<void> {

@@ -8,6 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import type { EntityManager } from 'typeorm';
+import type { Readable } from 'node:stream';
 import { In, Repository } from 'typeorm';
 import { File, FileStatus } from './file.entity';
 import { FILE_JOB_QUEUE, FileJobQueue } from './file-queue.port';
@@ -146,6 +147,28 @@ export class FilesService {
 
   async getOwnedSafe(userId: string, fileId: string): Promise<SafeFile> {
     return this.toSafeFile(await this.getOwned(userId, fileId));
+  }
+
+  /**
+   * Owner-only object stream for the content/download endpoint. Ownership is
+   * checked first (404 for foreign files, no existence leak) and the object is
+   * never buffered in memory — the caller has not flushed a response yet, so a
+   * missing object still surfaces as a clean 404.
+   */
+  async getContent(userId: string, fileId: string): Promise<{ file: File; stream: Readable }> {
+    const file = await this.getOwned(userId, fileId);
+    try {
+      const stream = await this.storage.getStream(file.storageKey);
+      this.logger.log(`file.content.served fileId=${file.id} userId=${userId} size=${file.size}`);
+      return { file, stream };
+    } catch (error) {
+      // The row exists but the object does not: a real inconsistency, and one
+      // the admin file view can investigate. Never expose the storage key.
+      this.logger.error(
+        `file.content.missing fileId=${file.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      throw new NotFoundException('محتوای این فایل در Storage پیدا نشد.');
+    }
   }
 
   /** Safe shape for a list of files of one conversation (ownership pre-checked). */
