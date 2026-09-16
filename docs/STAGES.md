@@ -129,7 +129,7 @@ checks still pass).
 - **Accessibility**: global `:focus-visible`, aria-live toasts, role=alert errors,
   aria-current/expanded semantics, reduced-motion support, ≥44px touch targets.
 - **Deliberate MVP skips** (documented in DESIGN_SYSTEM.md decision log): regenerate
-  action (no backend endpoint), file upload (visual placeholder only), settings page
+  action (no backend endpoint), file upload (visual placeholder only at the time — implemented in Stage 13), settings page
   (profile menu covers theme/admin/logout).
 
 **Verification**: `vue-tsc --noEmit` clean, production build clean, dev server serves
@@ -143,6 +143,8 @@ automation runtime unavailable) — visual review pending a manual pass.
 - Single access token, no refresh/rotation or logout invalidation.
 - API keys unencrypted at rest.
 - No rate limiting; no observability; k6 load test deliberately skipped (no requirement yet).
+- (Stage 13) File worker is in-process; OCR is CPU-bound and single-language; no file
+  preview/download; no extracted-text admin view. See [FILES.md](FILES.md).
 - Frontend browser-level GUI testing not yet automated (API layer fully covered by smoke tests).
 
 ## Stage 9 — Responsive hardening (320px–1440px)
@@ -360,3 +362,94 @@ Decisions:
   on refresh" state to auto-retry; orphaned rows surface an explicit retry.
 - Token-level provider resume is impossible with stateless completion APIs;
   the honest fallback (interrupted + retry) is documented, not faked.
+
+## Stage 13 — File upload & asynchronous processing (Day 5–6)
+
+Goal: attach PDF / Excel / image files to a conversation, with the heavy work
+(extraction, parsing, OCR) done in the background so chat never waits.
+
+**Backend** (commits 19547af, 3b49702, 7d8141e, 974be59, 952415e)
+- `files` entity (`File`): owner + conversation FKs (CASCADE), original name,
+  resolved MIME, size, storage key, status, extracted text, safe error message,
+  attempts, timestamps. Indexes `(conversation_id, status)` and `(status, updated_at)`.
+- Status machine `UPLOADING → PROCESSING → READY|FAILED`, plus `READY|FAILED →
+  PROCESSING` for an explicit admin reprocess only; `assertTransition()` throws on
+  anything else, and the worker claims a row with a conditional `UPDATE … WHERE
+  status IN ('UPLOADING','PROCESSING')` so the claim is atomic.
+- `FileStorageService` over MinIO. Keys are always `files/{userId}/{conversationId}/
+  {uuid}.{ext}` — server-generated, the filename is never a path. The bucket is
+  created idempotently at startup and a missing MinIO does not stop the API booting.
+- Hand-rolled content detection (no detector dependency): `%PDF-`, PNG, JPEG, OLE2
+  (with a `Workbook`/`Book` UTF-16 stream marker so `.doc` is rejected) and OOXML
+  zip. The declared MIME, the content signature and the extension must all agree.
+- `FilesService.upload`: validate → store → insert row (`UPLOADING`) → enqueue →
+  respond. A failed insert deletes the stored object; a failed enqueue leaves the
+  row `UPLOADING` for the sweeper and still returns 201.
+- BullMQ queue `file-processing`, payload `{fileId}` (no binary in Redis), `jobId =
+  fileId`, 3 attempts, exponential backoff, timeouts bounded by
+  `FILE_PROCESSING_TIMEOUT_MS`, `concurrency: 2`.
+- `FileProcessingService` (transport-free, unit-tested) + thin `FileProcessor`
+  consumer: idempotent skip of terminal rows, permanent-vs-transient error classes
+  (`PermanentExtractionError`), READY written together with the text, safe Persian
+  reason on FAILED, and a 60 s orphan sweeper that re-enqueues lost jobs and fails
+  rows that already burned their attempts.
+- Extraction: pdf-parse (page-labeled text; empty text layer = explicit failure),
+  SheetJS (per-sheet `Name | Age | City` tables, empty/malformed handling), and
+  tesseract.js OCR (real OCR, language data cached outside the repo, air-gapped via
+  `OCR_DATA_PATH`).
+- Endpoints: upload / conversation file list / single-file status (owner-only, 404
+  for foreign ids) and, for admins, a global list with counts, `/stats` with live
+  queue depth, and reprocess.
+
+**Chat integration**
+- `POST /conversations/:id/messages` accepts `fileIds` (≤ 5, uuids).
+  `getReadyContext()` resolves them **inside the conversation** and rejects
+  anything not `READY` — a `PROCESSING` file answers «این فایل هنوز در حال پردازش
+  است…», a `FAILED` file explains itself, and a foreign/unknown id is a single 400
+  that never confirms existence.
+- `buildContextualPrompt()` wraps the extracted text in explicit delimiters and
+  splits `FILE_MAX_CONTEXT_CHARS` evenly across attachments, annotating truncated
+  files instead of silently cutting them. With no attachments the prompt is
+  byte-identical to the pre-feature path.
+- `messages.attached_file_ids` (jsonb) persists the chips so a reload restores them.
+
+**Frontend** (commit 92d5d26, admin view 42d98de)
+- `FileChip.vue` (kind icon + name + size + spinner/check/cross status) reused by
+  the composer and by sent messages; the composer's attach button is now functional
+  (multi-select, client-side pre-checks, removable chips before send).
+- ChatView uploads immediately on selection (so `UPLOADING` is real, not a client
+  illusion), polls `GET /files/:id` while any attachment is not terminal, and
+  restores chips + statuses from `GET /conversations/:id/files` after a refresh.
+- `AdminFilesView.vue` + `FileTable.vue`: status filter, counts, queue depth,
+  user/conversation context, safe error text, reprocess action.
+
+**Issues found & fixed during verification**
+- `file-type` and `@nestjs/bullmq` are ESM-only and unusable from Jest's CJS
+  transform. Replaced the first with in-house signature detection and split the
+  second behind a `FileJobQueue` port so the processing logic is transport-free.
+- SheetJS parses arbitrary text as CSV, so a mislabeled text file "extracted"
+  successfully. Added a container-format guard before parsing.
+- **Real bug found by the E2E script:** reprocessing a file set the row to
+  `PROCESSING` while BullMQ silently dropped the job (its `jobId` matched a
+  still-retained terminal job), leaving the file stuck forever and invisible to the
+  sweeper. The enqueue now clears a terminal job first and keeps the jobId dedupe
+  for live jobs (commit 952415e).
+
+**Verification**
+- backend jest 162/162, `tsc --noEmit` clean
+- `scripts/file-processing-test.mjs` 43/43 (upload → READY for all three kinds,
+  corrupt → FAILED, validation, cross-user + cross-conversation denial, admin view,
+  reprocess, refresh recovery, chat while PROCESSING — verified against a local echo
+  provider so the streamed answer proves the extracted text reached the model)
+- `scripts/smoke-test.mjs` 75/75 (Day 1–4 regression, green after the feature)
+- `vue-tsc --noEmit` clean; frontend production build clean
+
+**Decisions**
+- Worker in-process with the API, not a separate deployment — no new service to run
+  for a one-week MVP; the sweeper makes a crash recoverable.
+- Object store for the binary + Postgres for metadata (never the other way round).
+- Polling instead of WebSocket for file status: the chat already has SSE, and adding
+  a second push channel for a slow-moving status was not worth the surface.
+- No download/preview endpoint: files are AI context, not attachments to fetch.
+- Real OCR rather than a fake success path; if OCR cannot run, the file fails with a
+  reason (verified in this environment before committing to the library).

@@ -250,8 +250,16 @@ Used in sidebar, chat header (mobile), auth brand panel, empty chat, admin heade
       detail never leaked) + primary-accent **تلاش مجدد** button.
   Retry is disabled while another send is in flight. No heavy bubbles.
 * `chat/MessageComposer.vue` — rounded composer (radius-xl, focus ring), autosizing
-  textarea (Enter=send, Shift+Enter=newline), disabled attachment button («به‌زودی»),
-  model selector, send/stop, char counter near the 4000 limit, streaming status line.
+  textarea (Enter=send, Shift+Enter=newline), model selector, send/stop, char counter near
+  the 4000 limit, streaming status line. The attachment button is live: it opens the file
+  picker, rejects unsupported/oversized files locally before upload, and shows the pending
+  attachments as removable `FileChip`s in a wrapping row above the textarea.
+* `chat/FileChip.vue` — one file: kind icon (document / sheet / image, inline SVG), ellipsized
+  name, `LTR` size, and a status affordance — pulsing spinner «در حال آپلود…» /
+  «در حال پردازش…», check «آماده», cross «پردازش ناموفق». Tone follows the semantic palette
+  (`--info-soft` while working, `--success-soft` when ready, `--danger-soft` on failure) and
+  matches the admin status pills. `role="status"`; the tooltip carries the safe failure reason.
+  Reused by the composer (with a remove button) and by sent messages (read-only).
 * `admin/ModelTable.vue` — dense table ≥768px, stacked cards below. Inactive rows dimmed,
   default model marked and protected from destructive actions. Free access is a pill
   toggle (`role="switch"`, info/warning palette) in its own «دسترسی» column.
@@ -260,6 +268,9 @@ Used in sidebar, chat header (mobile), auth brand panel, empty chat, admin heade
 * `admin/ModelForm.vue` — modal form: provider radio cards (mock / OpenAI-compatible),
   an `isFree` switch (label + explanatory line + knob, `role="switch"`),
   validation, API key note.
+* `admin/FileTable.vue` — upload-processing table: name (+kind icon), owner email,
+  conversation title, type, size, `FileChip` status, created-at, safe error text, and a
+  Reprocess action on `READY`/`FAILED` rows. Dense table ≥768px, stacked cards below.
 
 ---
 
@@ -303,6 +314,14 @@ An **offline banner** slides in under the chat header (200ms ease-out) when
 `aria-live="polite"`, and disappears the instant connectivity returns. The banner
 is a UI HINT — it never blocks sending (a request will still surface its own error).
 
+**Attachments** live in a wrapping chip row above the composer. The upload starts the moment
+a file is picked, so «در حال آپلود…» reflects a real request, and the status only advances to
+«آماده» when the backend says `READY` — the UI never optimistically claims success. While any
+chip is non-terminal the view polls the file status endpoint; after a reload the chips and their
+statuses are rebuilt from the conversation's file list (never from memory). A failed chip keeps a
+red tone and its reason, and sending with a non-ready chip is refused with a clear toast rather
+than a silently empty answer.
+
 The **last-opened conversation** persists across reloads (`localStorage`
 `hooshyar.active-conversation`, UUID-validated). Foreign / deleted ids are
 silently cleared.
@@ -313,6 +332,14 @@ Toolbar (count + primary «افزودن مدل») → table/cards. Loading skele
 retry ErrorState; destructive actions confirmed in modal; outcome via toast. Switch
 controls (free access) toggle inline via `PATCH` and re-fetch; backend refusals (e.g.
 un-freeing the default model) surface as error toasts.
+
+## Admin Files
+
+Same shell as Admin List. A status filter (`همه` / `UPLOADING` / `PROCESSING` / `READY` /
+`FAILED`) with per-status counts plus a queue-depth line, a dense table / stacked cards, and an
+empty state when a filter matches nothing. Failure reasons are shown as-is (they are already
+user-safe) and never as raw stack traces; the Reprocess action is only offered on terminal rows
+and its outcome surfaces as a toast.
 
 ---
 
@@ -480,6 +507,24 @@ Reason:   Excellent Persian readability; Inter keeps emails/ids crisp; both
           self-hosted via @fontsource (no runtime CDN dependency).
 Date:     2026-09-13
 Affected: main.ts, base.css.
+
+Decision: A file chip only shows «آماده» when the backend says READY — the upload status is
+          never advanced optimistically, and a non-ready attachment blocks sending with an
+          explicit message instead of being dropped silently
+Reason:   The file's status is server state (queued, extracted, failed). A hopeful UI would
+          answer from a file whose text does not exist yet and would hide genuine failures;
+          telling the user «این فایل هنوز در حال پردازش است» is honest and actionable.
+Date:     2026-09-16
+Affected: FileChip.vue, MessageComposer.vue, ChatView.vue.
+
+Decision: File chips reuse the existing status-pill language (soft semantic tint + inline
+          SVG icon) rather than introducing an upload-specific visual pattern
+Reason:   The same four states already exist for models (active/inactive/free) and there is no
+          new affordance to invent — a new pattern would have to be maintained in two places.
+          Working states borrow the info palette, ready the success palette, failure the
+          danger palette, so a row of chips reads at a glance in both themes.
+Date:     2026-09-16
+Affected: FileChip.vue, FileTable.vue.
 ```
 
 ---

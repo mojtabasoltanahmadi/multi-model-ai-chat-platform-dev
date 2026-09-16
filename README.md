@@ -1,21 +1,31 @@
 # AI Chat MVP — پلتفرم چت چندمدلی
 
 A minimal, working MVP of a multi-model AI chat platform for Persian-speaking users:
-register/login, own conversations, streamed AI responses, and admin-managed AI models.
+register/login, own conversations, streamed AI responses, admin-managed AI models, and
+file attachments (PDF / Excel / image) processed asynchronously in the background.
 
 - **Backend**: NestJS + TypeORM + PostgreSQL (modular monolith, port 4000)
 - **Frontend**: Vue 3 + TypeScript + Vite (RTL Persian UI, port 5200, light & dark themes)
+- **File storage**: MinIO (`chat-files` bucket) — the binary never enters PostgreSQL
+- **Background work**: BullMQ over Redis (`file-processing` queue, worker in the backend process)
 
 ## Quick Start
 
 ### 1. Prerequisites
 
 - Node.js 20+ (developed on Node 24)
-- PostgreSQL 14+ (developed on PostgreSQL 18) — either a local install or `docker compose up -d db` (compose file provided in `infra/` if you use Docker)
+- PostgreSQL 14+ (developed on PostgreSQL 18) — a local install or the compose service
+- Redis + MinIO — both provided by `infra/docker-compose.yml` (needed for file uploads)
 
-### 2. Database
+### 2. Infrastructure
 
-Create a database (example):
+Everything the backend needs (database, object storage, queue broker) runs from one compose file:
+
+```bash
+docker compose -f infra/docker-compose.yml up -d      # db (5433), redis (6379), minio (9000/9001)
+```
+
+Prefer a local PostgreSQL? Create the database instead and still start redis + minio:
 
 ```sql
 CREATE DATABASE ai_chat_mvp;
@@ -30,9 +40,10 @@ npm install
 npm run start:dev           # http://localhost:4000/api
 ```
 
-On first boot the backend creates the schema (`DB_SYNCHRONIZE=true`, dev convenience) and seeds
-an admin account from `ADMIN_EMAIL` / `ADMIN_PASSWORD` (defaults: `admin@example.com` / `admin1234` —
-change them for any real deployment).
+On first boot the backend creates the schema (`DB_SYNCHRONIZE=true`, dev convenience), creates the
+MinIO bucket if needed, and seeds an admin account from `ADMIN_EMAIL` / `ADMIN_PASSWORD` (defaults:
+`admin@example.com` / `admin1234` — change them for any real deployment). When you use the compose
+database rather than a local install, set `DB_PORT=5433` to match its published port.
 
 ### 4. Frontend
 
@@ -53,15 +64,19 @@ The Vite dev server proxies `/api` to `http://localhost:4000`, so no CORS setup 
      `baseUrl`, and `apiKey`)
 3. The first active model automatically becomes the default.
 4. Register a normal user, create a conversation, and chat — responses stream in live.
+5. Attach a PDF, Excel file or image with the 📎 button. The chip shows «در حال آپلود…» →
+   «در حال پردازش…» → «آماده», and the file becomes usable as context once it is ready.
+   Chat stays fully usable while a file is processing.
 
 ## Tests
 
 ```bash
 cd backend
-npx jest                    # 55 unit tests (no database needed)
+npx jest                             # 162 unit tests (no database or services needed)
 
-# with the backend running:
-node ../scripts/smoke-test.mjs       # 58 end-to-end HTTP checks
+# with the backend + postgres + redis + minio running:
+node ../scripts/smoke-test.mjs       # 75 end-to-end HTTP checks (Day 1-4 regression)
+node ../scripts/file-processing-test.mjs   # 43 file upload/processing checks (Day 5-6)
 ```
 
 ## Documentation
@@ -70,6 +85,7 @@ node ../scripts/smoke-test.mjs       # 58 end-to-end HTTP checks
 - [DESIGN_SYSTEM.md](DESIGN_SYSTEM.md) — visual source of truth: tokens, components, page patterns, decision log
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — modules, data model, invariants, error handling
 - [docs/API.md](docs/API.md) — endpoint reference and the SSE streaming protocol
+- [docs/FILES.md](docs/FILES.md) — file upload, storage, queue/worker, extraction, limits, recovery
 - [docs/STAGES.md](docs/STAGES.md) — implementation stages, decisions, edge cases, known limitations
 
 ## Security notes
@@ -85,12 +101,23 @@ node ../scripts/smoke-test.mjs       # 58 end-to-end HTTP checks
   models, and every chat send re-verifies that the requested (or default) model is active
   and allowed for the caller's plan — hiding models in the UI is never the authorization
   mechanism (see docs/ARCHITECTURE.md → Free-model access & plan authorization).
+- File ownership is enforced in the query on every read and upload (foreign files and
+  conversations are 404, never 403), uploads are validated by content signature rather than by
+  trusting the filename or the declared MIME, storage keys are server-generated
+  (`files/{userId}/{conversationId}/{uuid}`), and MinIO credentials never leave the backend.
+  An attached file must belong to the conversation being written to and be `READY` before its
+  text can reach a prompt. Admin file endpoints are role-guarded server-side.
 
 ## Known limitations (deliberate MVP scope)
 
 - Schema via `DB_SYNCHRONIZE` instead of migrations (dev-only convenience, see docs/STAGES.md)
 - Access tokens only (no refresh tokens / logout blacklist)
 - API keys stored in plain text in the database (masked at the API boundary)
-- Attachment button in the composer is visual-only (file upload intentionally out of MVP)
+- The file worker runs inside the backend process (a separate worker deployment is future work)
+- OCR is CPU-bound and single-language (`OCR_LANGUAGE`, default `eng`); scanned PDFs are not
+  OCR-ed (a PDF with no text layer fails rather than being rasterized)
+- No file preview or download endpoint, no antivirus scanning, and no extracted-text view in
+  the admin panel (admins see status, size, type and the safe error reason)
+- File status updates are polled by the UI, not pushed
 - No regenerate-message action (requires a backend regenerate endpoint)
-- No rate limiting, Redis/queues, or observability stack — none are needed yet
+- No rate limiting or observability stack — none are needed yet
