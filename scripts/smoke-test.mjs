@@ -381,7 +381,7 @@ async function main() {
   const failingConv = await api('POST', '/conversations', { token: userToken, body: {} });
   const failingStream = await streamMessage(userToken, failingConv.json.id, { content: 'سلام' });
   check('AI failure does not crash backend (SSE 200)', failingStream.status === 200);
-  check('AI failure emits error event with generic message', failingStream.finalEvent === 'error' && /موقتاً در دسترس نیست/.test(failingStream.events.at(-1)?.data.message ?? ''));
+  check('AI failure emits failed event with generic message', failingStream.finalEvent === 'failed' && /موقتاً در دسترس نیست/.test(failingStream.events.at(-1)?.data.message ?? ''));
   const failingConvAfter = await api('GET', `/conversations/${failingConv.json.id}`, { token: userToken });
   const failedAssistant = failingConvAfter.json.messages.filter((m) => m.role === 'assistant');
   check('failed turn still persists exactly ONE assistant message', failedAssistant.length === 1);

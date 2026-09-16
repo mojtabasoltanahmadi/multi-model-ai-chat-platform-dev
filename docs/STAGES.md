@@ -208,3 +208,155 @@ extended with free/premium authorization checks (run requires a live backend + D
   that is always valid for free users.
 - `UserPlan = 'free'` parameter kept on the service API so later plans plug into the
   same chokepoint without refactoring.
+
+## Stage 11 — Conversation resilience (Day 3 + Day 4)
+
+Goal: a chat turn survives every realistic interruption without losing the
+user's intent and without orphaning AI text. Full spec:
+[CONVERSATION_RESILIENCE.md](CONVERSATION_RESILIENCE.md).
+
+**Backend — pre-persist + state machine**
+- `assertChatTurnAllowed` runs all 4xx checks (auth, ownership, plan, model
+  state, idempotency content collision) **before** SSE headers flush. No 4xx
+  ever produces an orphan SSE response.
+- Assistant row is pre-persisted with `status='pending'` immediately after
+  the user row, before the first `meta` event. A reload between POST and
+  first delta still finds the row.
+- `messages.status` enum extended from `{completed, error}` to
+  `{pending, streaming, completed, interrupted, failed}`.
+- Disconnect vs failure disambiguation: the catch block asks
+  `isClientDisconnected()` before classifying an `AbortError`. Client-side
+  aborts become `interrupted` (no `error` event — the disconnector cannot
+  receive it); genuine provider failures become `failed` and emit a generic
+  client message.
+- A post-loop `isClientDisconnected()` check handles the edge case where the
+  client bails out before any delta arrives (the for-await body never runs,
+  so the in-loop check is unreachable).
+
+**Backend — idempotency**
+- New `messages.client_message_id` column, indexed by
+  `(conversation_id, role, client_message_id)`. Same token allowed across
+  conversations.
+- Reuse + matching content → replay (same user row, fresh assistant row,
+  `meta.replay = true`).
+- Reuse + mismatched content → 400 in pre-flight
+  (`این پیام قبلاً با متن دیگری ارسال شده است.`).
+- `Idempotency-Key` HTTP header accepted as a mirror of the body field, for
+  proxies and replay logs.
+
+**Frontend — types + API**
+- `MessageStatus` union widened to match the backend.
+- `Message` carries `clientMessageId` and `errorMessage`.
+- `streamChatMessage` accepts `clientMessageId` and sends it on both the body
+  and the `Idempotency-Key` header.
+- `StreamMetaPayload` now includes `assistantMessage` (real id, `status='pending'`)
+  and `replay: boolean`.
+
+**Frontend — useOnline**
+- New singleton composable wrapping `navigator.onLine` + the `online`/`offline`
+  window events. Treated as a UI hint (banner), not a transport guarantee —
+  every request still surfaces its own error.
+
+**Frontend — ChatView**
+- Last-opened conversation persisted in `localStorage` under
+  `hooshyar.active-conversation` (UUID-validated; foreign ids silently cleared).
+- Optimistic user row + streaming placeholder tagged `__streaming__`; the
+  placeholder is replaced by the real row on the `meta` event.
+- `newClientMessageId()` generates a `<prefix>-<base36 ts>-<rand>` token
+  (≤ 64 chars) for every fresh send.
+- `send(content, { clientMessageId? })` accepts a pre-existing id for Retry —
+  the backend treats it as a replay.
+- `stopStreaming()` marks the placeholder `interrupted` locally and triggers
+  `loadMessages()` to reconcile with the DB.
+- Offline banner slides in under the chat header with a pulsing red dot
+  (`role="status"` `aria-live="polite"`).
+
+**Frontend — MessageItem**
+- New status variants: `interrupted` (italic muted) and `failed` (red
+  surface with `errorMessage`).
+- Retry button visible on `interrupted` / `failed`; disabled while another
+  send is in flight.
+- Retry calls `send(userRow.content, { clientMessageId: userRow.clientMessageId })`,
+  removing the failed/interrupted assistant row first so the optimistic
+  stream doesn't double the bubble.
+
+**Edge cases covered**
+(`scripts/smoke-test.mjs` 75 checks + `scripts/resilience-test.mjs` 14 checks +
+backend Jest 63 specs):
+
+- Pre-flight rejects idempotency content collision with 400 (no orphan SSE).
+- Aborted mid-stream persists `status='interrupted'` with partial content.
+- Disconnect BEFORE first delta persists `interrupted` (post-loop check).
+- Provider timeout persists `failed` (not `interrupted`) — disambiguated.
+- `Idempotency-Key` header round-trip = same as body field.
+- Meta event carries the real `assistantMessage.id` and `replay` flag.
+- Two-tab / refresh / retry all surface the last persisted state with no
+  duplicate user row.
+
+**Verification**: backend Jest 63/63 (incl. pre-flight + disambiguation specs),
+backend `tsc` clean, `vue-tsc` clean, both production builds clean.
+`scripts/smoke-test.mjs` 75/75 (incl. status='failed', idempotency reuse,
+header round-trip, content-mismatch → 400). `scripts/resilience-test.mjs`
+14/14 (real aborts, partial content kept, Retry semantics).
+
+**Decisions**
+- No WebSocket — SSE is enough for one-way streaming.
+- No Redis / BullMQ / queue — the database is the durable buffer.
+- `interrupted` vs `failed` as separate statuses (not collapsed) so the UI
+  can show a generic "Retry" instead of an error toast when the user
+  clicked Stop themselves.
+- Idempotency is the only double-send mechanism — no per-tab locks, no
+  per-user queues. The composite index is enough.
+- Retry creates a new assistant row (no row mutation); a future
+  "regenerate" surface will reuse the same code path with different copy.
+- No client-side retry queue — Retry is a deliberate user action. We never
+  silently re-send.
+
+## Stage 12 — Detached generation + reconnect stream
+
+Backend (commit 01021fd):
+- `GenerationRegistry`: in-process fan-out of delta/done/failed events plus an
+  authoritative content buffer for reconnect snapshots.
+- `beginChatTurn` + detached `runGeneration`: the AI loop is decoupled from the
+  HTTP response. Client disconnect (refresh, closed tab, network loss) only
+  unsubscribes — the generation continues, persists progress (status flips to
+  `streaming` on the first token; content flushed on a 1.5s throttle,
+  `AI_PERSIST_INTERVAL_MS`), and always reaches a persisted terminal state.
+- `GET /conversations/:id/messages/:messageId/stream`: recovery stream.
+  Subscribe-first/snapshot-second ordering guarantees no token is lost or
+  duplicated. Completed rows replay as snapshot+done without re-invoking the
+  AI; orphaned pending/streaming rows (server restart) are honestly marked
+  `interrupted` and offered for retry.
+- Terminal SSE event renamed `error` → `failed` and now carries the persisted
+  `assistantMessage` alongside the generic client message.
+
+Frontend (commits 14fe127 and the follow-up hardening):
+- `reconnectGenerationStream` client (GET SSE reader; snapshot REPLACES,
+  deltas APPEND).
+- ChatView: after every conversation load, the latest pending/streaming
+  assistant row auto-attaches to the live generation. `activeStreamRowId`
+  generalizes the streaming slot (optimistic placeholder or persisted row).
+- Follow-up fixes: retry no longer duplicates the user bubble
+  (`existingUserRowId`); a transport drop after deltas arrived no longer
+  fabricates a `failed` row — tokens are kept, the row renders `interrupted`
+  locally, and a `watch(online)` hook re-attaches to the same generation when
+  connectivity returns; the SSE dispatcher handles the `failed` event name
+  (previously only `error`, so terminal failures left the UI streaming
+  forever); Stop no longer double-refreshes the sidebar.
+
+Verification:
+- backend jest 69/69
+- scripts/smoke-test.mjs 75/75
+- scripts/resilience-test.mjs 28/28 (rewritten for the detached contract:
+  abort→completes, completed-replay, two-clients-one-generation with exact
+  snapshot+delta equality, ownership 404s, replay row counts, pre-delta abort)
+- vue-tsc --noEmit clean; frontend production build clean
+
+Decisions:
+- Snapshot-based reconnect instead of the drafted Last-Event-ID cursor design
+  (docs/superpowers/specs/2026-09-15-conversation-stream-resume-design.md,
+  marked superseded): no event ids, no ring buffer, no 410s, no schema change.
+- No auto-retry-on-return: with detached generation there is no "interrupted
+  on refresh" state to auto-retry; orphaned rows surface an explicit retry.
+- Token-level provider resume is impossible with stateless completion APIs;
+  the honest fallback (interrupted + retry) is documented, not faked.

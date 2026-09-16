@@ -175,9 +175,12 @@ users ──< conversations ──< messages >── ai_models
 * **conversations**: id (PK), title, user_id (FK → users, ON DELETE CASCADE), created_at,
   updated_at. Index on user_id.
 * **messages**: id (PK), conversation_id (FK → conversations, ON DELETE CASCADE),
-  role ('user' | 'assistant'), content, status ('completed' | 'error' | NULL — NULL for
-  user rows), error_message (internal only), model_id (FK → ai_models, ON DELETE SET
-  NULL), created_at. Indexes on conversation_id, model_id.
+  role ('user' | 'assistant'), content,
+  status ('pending' | 'streaming' | 'completed' | 'interrupted' | 'failed' | NULL —
+  NULL for user rows), error_message (internal only), model_id (FK → ai_models,
+  ON DELETE SET NULL), client_message_id (idempotency token, indexed by
+  (conversation_id, role, client_message_id)), created_at.
+  Indexes on conversation_id, model_id.
 * **ai_models**: id (PK), name, provider ('mock' | 'openai-compatible') `[A-2]`,
   external_model_id, base_url (nullable), api_key (nullable, never returned by any API),
   is_active, is_default, created_at.

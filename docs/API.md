@@ -25,35 +25,141 @@ JWT payload: `{ sub: userId, email, role }`, expires in `JWT_EXPIRES_IN` (defaul
 
 ## Messages (streaming)
 
-`POST /conversations/:conversationId/messages` — body `{ content, modelId? }`
+`POST /conversations/:conversationId/messages` — body `{ content, modelId?, clientMessageId? }`
 
 - `content` must be non-blank, ≤ 4000 chars (validated at the boundary)
 - `modelId` optional; must reference a model that is **active** (and **free** for FREE-plan
   callers) — otherwise the default model is used. Authorization is re-checked on every send
   against current backend state; the frontend is never trusted (403 for a premium model
   requested by a FREE user, even via direct API calls).
+- `clientMessageId` optional; opaque client-generated token (≤ 64 chars) used for idempotency.
+  The same value may also be sent as the `Idempotency-Key` HTTP header — both are accepted,
+  the header is just a convenience for proxies and replay logs.
 
-Pre-flight failures return normal JSON errors (404 unknown/foreign conversation, 404 unknown
-model, 400 inactive model / no valid default, 403 model not allowed for the caller's plan).
-Success responds **200 text/event-stream**:
+### Pre-flight
+
+All 4xx-class errors (auth, ownership, plan, model state, **idempotency content collision**)
+are caught by `MessagesService.assertChatTurnAllowed` **before** the SSE headers are
+flushed. The frontend never sees an orphan SSE response carrying a JSON error.
+
+| Failure | Status | Body |
+|---|---|---|
+| Unknown / foreign conversation | 404 | `{ message }` |
+| Unknown model id | 404 | `{ message }` |
+| Inactive model | 400 | `{ message }` |
+| Model not allowed for caller's plan | 403 | `{ message }` |
+| `clientMessageId` matches an existing user row whose `content` differs | 400 | `{ message: "این پیام قبلاً با متن دیگری ارسال شده است." }` |
+
+### Success — 200 `text/event-stream`
+
+Exactly one assistant message row is persisted per turn in every outcome, including failure.
+The order of events on a normal run:
 
 ```
 event: meta
-data: {"userMessage":{...},"model":{"id","name","provider"}}
+data: {
+  "userMessage":      { id, role: "user", content, status: null, ... },
+  "assistantMessage": { id, role: "assistant", content: "", status: "pending", ... },
+  "model":            { id, name, provider },
+  "replay":           false
+}
 
 event: delta
-data: {"text":"chunk"}
+data: { "text": "chunk" }     // repeated as the provider streams
 
 event: done
-data: {"assistantMessage":{ "status": "completed", ... }}
-
--- or, on provider failure (partial content already persisted with status "error"):
-
-event: error
-data: {"message":"سرویس هوش مصنوعی موقتاً در دسترس نیست. لطفاً دوباره تلاش کنید."}
+data: { "assistantMessage": { status: "completed", content, ... } }
 ```
 
-Exactly one assistant message is persisted per turn in every outcome.
+`meta` carries the real `assistantMessage.id` so the client can swap its placeholder for
+the persisted row immediately (no race between optimistic UI and DB state).
+
+### Replay
+
+A `clientMessageId` that matches an existing user row **with the same content** is treated
+as a retry: the existing user row is reused (no duplicate), a **fresh** assistant row is
+created, and `meta.replay = true`. The body of the request must match the original
+character-for-character; see the `400` row above for the mismatch path.
+
+### Failure paths
+
+Provider error (timeout, 5xx, refused connection). Partial content is persisted with
+`status: "failed"` and a server-side `errorMessage`. The client receives a non-leaky
+generic message:
+
+```
+event: failed
+data: { "assistantMessage": { status: "failed", ... }, "message": "سرویس هوش مصنوعی موقتاً در دسترس نیست. لطفاً دوباره تلاش کنید." }
+```
+
+Client disconnect (browser tab closed, network dropped, refresh). **No error event is
+emitted and the generation is NOT stopped** — disconnect ≠ failure. The HTTP connection
+merely unsubscribes from the generation; the AI loop keeps running, keeps persisting
+progress, and the row finishes as `status: "completed"`. A client that went away can
+re-attach via the reconnect endpoint below and receive the rest of the answer without
+regenerating anything.
+
+The full state machine and disambiguation rules live in
+[CONVERSATION_RESILIENCE.md](CONVERSATION_RESILIENCE.md).
+
+### Reconnect / recovery stream
+
+`GET /conversations/:conversationId/messages/:messageId/stream` — the recovery stream
+for a client that lost its live connection (refresh mid-stream, closed tab, network
+drop, or a second tab opening the same conversation).
+
+Pre-flight (before SSE headers): 404 for an unknown/foreign conversation or a message
+that is not an assistant row of that conversation.
+
+Events, in order:
+
+```
+event: snapshot
+data: { "assistantMessage": { content: "<full content so far>", status, ... } }
+
+// live generation only:
+event: delta
+data: { "text": "chunk" }      // the remaining deltas, never overlapping the snapshot
+
+// always exactly one terminal event:
+event: done
+  → { "assistantMessage": { status: "completed", ... } }
+event: failed
+  → { "assistantMessage": { status: "failed" | "interrupted", ... }, "message": "<generic>" }
+```
+
+Recovery behavior by row state:
+
+| Row state on the server | Behavior |
+|---|---|
+| Live generation in progress | `snapshot` + remaining `delta`s + terminal. The client joins the **same** generation — the AI is never re-invoked. |
+| `completed` | `snapshot` + `done`. Pure replay, no AI call. |
+| `failed` | `snapshot` + `failed` (generic message). Retry is a user action. |
+| `interrupted` (user pressed Stop) | `snapshot` + `failed` (generic message). Retry is a user action. |
+| `pending`/`streaming` with **no** live generation (server restarted mid-generation) | The row is honestly marked `interrupted` in the DB, then `snapshot` + `failed` with a "you can retry" message. No fake resume. |
+
+Snapshot/delta ordering guarantee: the server subscribes the reconnecting client
+**before** reading its content buffer, so a token is either in the snapshot or in a
+delta — never both, never neither. `snapshot + deltas` concatenates exactly to the
+persisted content.
+
+### Message shape
+
+```ts
+type MessageStatus = 'pending' | 'streaming' | 'completed' | 'interrupted' | 'failed';
+
+interface Message {
+  id: string;                  // uuid
+  conversationId: string;
+  role: 'user' | 'assistant';
+  content: string;
+  status: MessageStatus | null;  // null on user rows
+  errorMessage: string | null;   // server-side detail, never leaked to client
+  modelId: string | null;
+  clientMessageId: string | null; // user rows only
+  createdAt: string;             // ISO
+}
+```
 
 ## Models (authenticated)
 
@@ -75,7 +181,7 @@ Exactly one assistant message is persisted per turn in every outcome.
 
 | Status | Meaning |
 |---|---|
-| 400 | validation failure (empty/long message, bad UUID, inactive model, default-model rule incl. free access) |
+| 400 | validation failure (empty/long message, bad UUID, inactive model, default-model rule incl. free access, idempotency content collision) |
 | 401 | missing/invalid/expired JWT |
 | 403 | authenticated but insufficient role — or a model the caller's plan is not allowed to use |
 | 404 | unknown or foreign resource (no existence leak) |

@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Get,
   HttpStatus,
   Param,
   ParseUUIDPipe,
@@ -9,29 +10,36 @@ import {
   Res,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { MessagesService } from './messages.service';
+import { MessagesService, ChatStreamEvent } from './messages.service';
 import { SendMessageDto } from './dto/send-message.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 
 /**
- * Sends a message and streams the AI answer back as Server-Sent Events.
+ * Chat streaming endpoints (SSE over HTTP — kept per architecture rule).
  *
- * Event sequence (per chat turn):
- *   meta  → { userMessage, assistantMessage (status='pending'), model, replay }
- *           `assistantMessage.id` is the real, persisted id from the start —
- *           a reload can already address it.
- *   delta → one AI text chunk (repeated). The first delta implies the server
- *           has flipped the assistant row to status='streaming'.
- *   done  → final, persisted assistant message (status='completed').
- *   error → generic failure message; a partial assistant message with
- *           status='failed' has been persisted exactly once.
+ * POST /:conversationId/messages
+ *   Starts the turn and streams events while THIS connection is alive.
+ *   The generation itself runs detached from the response: when the client
+ *   disconnects (refresh, closed tab, network loss) the connection simply
+ *   unsubscribes — the generation continues server-side and persists its
+ *   progress. The client never sees "client disconnected" as an answer.
  *
- * Client-side disconnect: no further events are emitted; the assistant row
- * is persisted with status='interrupted' (partial content kept).
+ * GET /:conversationId/messages/:messageId/stream
+ *   Reconnect/recovery stream for an existing assistant generation:
+ *   snapshot (full content so far) → remaining deltas → terminal event.
+ *   Completed messages replay as snapshot + done without invoking the AI.
+ *   Orphaned generations (server restart) are honestly marked 'interrupted'.
  *
- * Idempotency: if `clientMessageId` is supplied and matches an existing
- * user row in this conversation, the user row is reused (no duplicate) and
- * `meta.replay = true` is emitted. The assistant row is always new.
+ * Event grammar (both endpoints):
+ *   meta      → send only: { userMessage, assistantMessage(pending), model, replay }
+ *   snapshot  → reconnect only: { assistantMessage } — full content so far
+ *   delta     → { text } (append)
+ *   done      → { assistantMessage } (terminal success)
+ *   failed    → { assistantMessage, message } (terminal; safe message only)
+ *
+ * Idempotency: clientMessageId (or Idempotency-Key header) reuses the user
+ * row on retry (meta.replay = true) — no duplicate user rows, and content
+ * collisions are rejected pre-stream with a normal 400.
  */
 @Controller('conversations')
 export class MessagesController {
@@ -54,8 +62,7 @@ export class MessagesController {
         : undefined);
 
     // Validate ownership, model availability, and idempotency BEFORE opening
-    // the SSE stream, so these errors reach the client as normal JSON errors
-    // (rather than being swallowed into a generic SSE error event).
+    // the SSE stream, so these errors reach the client as normal JSON errors.
     await this.messagesService.assertChatTurnAllowed(user.id, conversationId, dto.modelId, {
       clientMessageId,
       content: dto.content.trim(),
@@ -69,54 +76,125 @@ export class MessagesController {
     response.setHeader('X-Accel-Buffering', 'no');
     response.flushHeaders?.();
 
-    // response.destroyed becomes true when the client disconnects;
-    // writableEnded when we finished the stream ourselves.
-    const isClientDisconnected = () => response.writableEnded || response.destroyed;
+    const turn = await this.messagesService.beginChatTurn(
+      user.id,
+      conversationId,
+      dto.content.trim(),
+      dto.modelId,
+      clientMessageId,
+    );
 
-    try {
-      await this.messagesService.streamChatTurn(
-        user.id,
-        conversationId,
-        dto.content.trim(),
-        dto.modelId,
-        clientMessageId,
-        isClientDisconnected,
-        {
-          onMeta: (userMessage, assistantMessage, model, replay) => {
-            this.writeEvent(response, 'meta', {
-              userMessage: this.serializeMessage(userMessage),
-              assistantMessage: this.serializeMessage(assistantMessage),
-              model: { id: model.id, name: model.name, provider: model.provider },
-              replay,
+    // Disconnect signal: 'close' fires on both premature disconnects and our
+    // own normal end; the race just settles early in the normal case.
+    const disconnected = new Promise<void>((resolve) => {
+      response.once('close', resolve);
+    });
+
+    const pump = (async () => {
+      for await (const event of turn.events) {
+        if (response.writableEnded || response.destroyed) return;
+        if (event.type === 'meta') {
+          this.writeEvent(response, 'meta', {
+            userMessage: this.serializeMessage(event.userMessage),
+            assistantMessage: this.serializeMessage(event.assistantMessage),
+            model: { id: event.model.id, name: event.model.name, provider: event.model.provider },
+            replay: event.replay,
+          });
+        } else if (event.type === 'delta') {
+          this.writeEvent(response, 'delta', { text: event.text });
+        } else if (event.type === 'done') {
+          this.writeEvent(response, 'done', {
+            assistantMessage: this.serializeMessage(event.assistantMessage),
+          });
+          return;
+        } else if (event.type === 'failed') {
+          this.writeEvent(response, 'failed', {
+            assistantMessage: this.serializeMessage(event.assistantMessage),
+            message: event.clientMessage,
+          });
+          return;
+        }
+      }
+    })();
+
+    // Hold the response open until the generation completes or the client
+    // leaves. If the client leaves first: stop pumping (unsubscribe) and end
+    // the response — the generation keeps running server-side.
+    await Promise.race([pump, disconnected]);
+    if (!response.writableEnded && !response.destroyed) {
+      response.end();
+    }
+  }
+
+  @Get(':conversationId/messages/:messageId/stream')
+  async reconnectStream(
+    @CurrentUser() user: { id: string },
+    @Param('conversationId', ParseUUIDPipe) conversationId: string,
+    @Param('messageId', ParseUUIDPipe) messageId: string,
+    @Req() _request: Request,
+    @Res() response: Response,
+  ): Promise<void> {
+    // Ownership/existence errors surface as normal JSON before SSE starts.
+    await this.messagesService.assertReconnectAllowed(user.id, conversationId, messageId);
+
+    response.status(HttpStatus.OK);
+    response.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    response.setHeader('Cache-Control', 'no-cache');
+    response.setHeader('Connection', 'keep-alive');
+    response.setHeader('X-Accel-Buffering', 'no');
+    response.flushHeaders?.();
+
+    const disconnected = new Promise<void>((resolve) => {
+      response.once('close', resolve);
+    });
+
+    const pump = (async () => {
+      // beginChatTurn-style pre-flight errors (404/ownership) must surface as
+      // JSON, not SSE — validate before flushing… but headers are already
+      // flushed for SSE symmetry; instead the generator throws before its
+      // first event, so capture that and emit a terminal `failed` event (the
+      // response is already committed at this point).
+      try {
+        for await (const event of this.messagesService.reconnectGeneration(
+          user.id,
+          conversationId,
+          messageId,
+        )) {
+          if (response.writableEnded || response.destroyed) return;
+          if (event.type === 'snapshot') {
+            this.writeEvent(response, 'snapshot', {
+              assistantMessage: this.serializeMessage(event.assistantMessage),
             });
-          },
-          onDelta: (text) => this.writeEvent(response, 'delta', { text }),
-          onDone: (assistantMessage) => {
+          } else if (event.type === 'delta') {
+            this.writeEvent(response, 'delta', { text: event.text });
+          } else if (event.type === 'done') {
             this.writeEvent(response, 'done', {
-              assistantMessage: this.serializeMessage(assistantMessage),
+              assistantMessage: this.serializeMessage(event.assistantMessage),
             });
-            response.end();
-          },
-          onError: (clientMessage) => {
-            this.writeEvent(response, 'error', {
-              message: clientMessage,
+            return;
+          } else if (event.type === 'failed') {
+            this.writeEvent(response, 'failed', {
+              assistantMessage: this.serializeMessage(event.assistantMessage),
+              message: event.clientMessage,
             });
-            response.end();
-          },
-        },
-      );
-    } catch (error) {
-      // Ownership/validation failures happen before any event is written,
-      // so a normal HTTP error response is still possible here.
-      if (!response.writableEnded && !response.headersSent) {
-        throw error;
-      }
-      if (!response.writableEnded) {
-        this.writeEvent(response, 'error', {
-          message: 'سرویس هوش مصنوعی موقتاً در دسترس نیست. لطفاً دوباره تلاش کنید.',
+            return;
+          }
+        }
+      } catch {
+        // Ownership/not-found while the SSE headers are already sent: the
+        // client treats a closed stream without a terminal as "nothing to
+        // recover" and re-fetches the conversation via GET (JSON errors are
+        // available on the normal endpoints).
+        this.writeEvent(response, 'failed', {
+          assistantMessage: null,
+          message: 'پیام قابل بازیابی نیست.',
         });
-        response.end();
       }
+    })();
+
+    await Promise.race([pump, disconnected]);
+    if (!response.writableEnded && !response.destroyed) {
+      response.end();
     }
   }
 
@@ -153,3 +231,5 @@ export class MessagesController {
     };
   }
 }
+
+export type { ChatStreamEvent };

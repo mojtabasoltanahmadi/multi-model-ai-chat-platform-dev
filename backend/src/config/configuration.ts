@@ -18,5 +18,8 @@ export default () => ({
   },
   ai: {
     requestTimeoutMs: parseInt(process.env.AI_REQUEST_TIMEOUT_MS ?? '60000', 10),
+    // How often an in-flight generation flushes partial content to the DB.
+    // Bounds the text a crash can lose to roughly one interval of tokens.
+    persistIntervalMs: parseInt(process.env.AI_PERSIST_INTERVAL_MS ?? '1500', 10),
   },
 });

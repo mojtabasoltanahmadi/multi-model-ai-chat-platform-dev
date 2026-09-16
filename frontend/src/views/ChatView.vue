@@ -6,7 +6,7 @@ import EmptyChat from '../components/chat/EmptyChat.vue';
 import MessageItem from '../components/chat/MessageItem.vue';
 import MessageComposer from '../components/chat/MessageComposer.vue';
 import AppSkeleton from '../components/ui/AppSkeleton.vue';
-import { api, streamChatMessage, type StreamHandle } from '../api/client';
+import { api, streamChatMessage, reconnectGenerationStream, type StreamHandle } from '../api/client';
 import type { AiModel, Conversation, Message } from '../api/types';
 import { useToast } from '../composables/useToast';
 import { useOnline } from '../composables/useOnline';
@@ -64,22 +64,35 @@ watch(activeId, (value) => {
   }
 });
 
-// streaming placeholder id inside the messages list
+// streaming placeholder id inside the messages list (optimistic send only)
 const STREAM_ID = '__streaming__';
 const streaming = ref(false);
 const streamHandle = ref<StreamHandle | null>(null);
+/**
+ * The message row currently being streamed into — either the optimistic
+ * placeholder of a fresh send, or a persisted row being recovered via the
+ * reconnect stream (refresh / new tab / restored network).
+ */
+const activeStreamRowId = ref<string | null>(null);
 /**
  * clientMessageId of the in-flight send. Stored so a stop/abort/error path
  * can recover: the backend already persisted the user row with this id, so
  * the next refresh reads it back without losing the user's intent.
  */
 const inflightClientMessageId = ref<string | null>(null);
+/**
+ * Assistant row whose live feed a transport drop severed in THIS session
+ * (rendered locally as 'interrupted'). When connectivity returns, the
+ * online-watcher re-attaches it to the still-running generation. A deliberate
+ * Stop never sets this — a stopped turn stays stopped until the user retries.
+ */
+const networkRecoveryRowId = ref<string | null>(null);
 
 const completedMessages = computed(() =>
-  messages.value.filter((message) => message.id !== STREAM_ID),
+  messages.value.filter((message) => message.id !== activeStreamRowId.value),
 );
 const streamingMessage = computed(
-  () => messages.value.find((message) => message.id === STREAM_ID) ?? null,
+  () => messages.value.find((message) => message.id === activeStreamRowId.value) ?? null,
 );
 const activeConversation = computed(
   () => conversations.value.find((conversation) => conversation.id === activeId.value) ?? null,
@@ -95,6 +108,21 @@ onMounted(async () => {
     await loadMessages();
   } else {
     activeId.value = null;
+  }
+});
+
+// Connectivity returned: re-attach any row whose live feed a transport drop
+// severed this session (internet disconnect mid-stream). The generation kept
+// running server-side, so the reconnect stream hands back a snapshot plus the
+// remaining deltas — no AI re-invocation, no duplicated tokens.
+watch(online, (isOnline) => {
+  if (!isOnline || streaming.value || messagesLoading.value) return;
+  const rowId = networkRecoveryRowId.value;
+  if (!rowId) return;
+  networkRecoveryRowId.value = null;
+  const row = messages.value.find((m) => m.id === rowId);
+  if (row && (row.status === 'interrupted' || row.status === 'streaming')) {
+    void recoverGeneration(row);
   }
 });
 
@@ -147,6 +175,17 @@ async function loadMessages() {
     );
     messages.value = result.messages;
     await scrollToBottom(true);
+
+    // Recovery: an assistant row still pending/streaming means a generation
+    // is (or was) running server-side — re-attach instead of regenerating.
+    // Latest unfinished row only; completed/failed/interrupted rows load as-is.
+    const recoverable = [...result.messages]
+      .reverse()
+      .find(
+        (m) =>
+          m.role === 'assistant' && (m.status === 'pending' || m.status === 'streaming'),
+      );
+    if (recoverable) void recoverGeneration(recoverable);
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'خطا';
   } finally {
@@ -173,7 +212,10 @@ function newClientMessageId(): string {
   return `cm-${ts}-${rand}`;
 }
 
-async function send(content: string, options: { clientMessageId?: string } = {}) {
+async function send(
+  content: string,
+  options: { clientMessageId?: string; existingUserRowId?: string } = {},
+) {
   if (streaming.value) return;
   error.value = '';
 
@@ -192,6 +234,8 @@ async function send(content: string, options: { clientMessageId?: string } = {})
   // as a replay (same user row, new assistant row).
   const clientMessageId = options.clientMessageId ?? newClientMessageId();
   inflightClientMessageId.value = clientMessageId;
+  // A new send supersedes any pending network-recovery attachment.
+  networkRecoveryRowId.value = null;
 
   const optimisticUser: Message = {
     id: `local-${clientMessageId}`,
@@ -215,12 +259,16 @@ async function send(content: string, options: { clientMessageId?: string } = {})
     clientMessageId: null,
     createdAt: new Date().toISOString(),
   };
-  messages.value.push(optimisticUser, placeholder);
+  // A retry (manual or auto) reuses the user row already on screen — pushing
+  // the optimistic copy again would render the same message twice.
+  if (options.existingUserRowId) messages.value.push(placeholder);
+  else messages.value.push(optimisticUser, placeholder);
   // Stream deltas must mutate the row through the array's reactive proxy.
   // Writing to the raw `placeholder` literal bypasses Vue's proxy, so the
   // template would never re-render until some unrelated state change.
   const streamingRow = messages.value[messages.value.length - 1] as Message;
   streaming.value = true;
+  activeStreamRowId.value = STREAM_ID;
   pinnedToBottom.value = true;
   await scrollToBottom();
 
@@ -228,6 +276,7 @@ async function send(content: string, options: { clientMessageId?: string } = {})
   const finish = () => {
     streaming.value = false;
     streamHandle.value = null;
+    activeStreamRowId.value = null;
     inflightClientMessageId.value = null;
     void loadConversations(); // refresh titles and ordering
   };
@@ -257,18 +306,86 @@ async function send(content: string, options: { clientMessageId?: string } = {})
         finish();
       },
       onError: (message) => {
-        // The backend has persisted the partial answer with status='failed'.
-        // Pull the latest persisted state so the row reflects what the DB
-        // has, instead of a locally-fabricated one.
-        streamingRow.id = `local-error-${Date.now()}`;
-        streamingRow.status = 'failed';
-        streamingRow.errorMessage = message;
-        toast.error(message);
+        if (accumulated.length > 0) {
+          // The live feed dropped AFTER deltas arrived (network loss, or the
+          // provider died mid-flight). The generation keeps running and
+          // persisting server-side — disconnect ≠ failure. Keep every token
+          // already delivered, mark the view honestly detached, and let the
+          // online-watcher re-attach to the same generation when the network
+          // returns. Never fabricate a failed row here.
+          streamingRow.content = accumulated;
+          streamingRow.status = 'interrupted';
+          networkRecoveryRowId.value = streamingRow.id;
+          toast.error(message);
+        } else {
+          // Failed before any delta: the backend has persisted the turn's
+          // real state (or the request never landed). Reload instead of
+          // fabricating a row — the DB is the source of truth.
+          toast.error(message);
+          void loadMessages();
+        }
         finish();
-        void loadMessages();
       },
     },
   );
+}
+
+/**
+ * Recovery path: a persisted assistant row is still pending/streaming after a
+ * conversation load (refresh mid-stream, new tab, restored network). Attach
+ * to the live generation via the reconnect stream: the snapshot REPLACES the
+ * row content, subsequent deltas APPEND — the backend guarantees the two
+ * never overlap, so no token is duplicated and the answer completes from the
+ * generation that is already running server-side. The AI is never re-invoked.
+ */
+function recoverGeneration(row: Message) {
+  if (streaming.value) return;
+  const conversationId = activeId.value;
+  if (!conversationId) return;
+  const reactiveRow = messages.value.find((m) => m.id === row.id);
+  if (!reactiveRow) return;
+
+  streaming.value = true;
+  activeStreamRowId.value = row.id;
+  pinnedToBottom.value = true;
+
+  const finish = () => {
+    streaming.value = false;
+    streamHandle.value = null;
+    activeStreamRowId.value = null;
+    void loadConversations();
+  };
+
+  streamHandle.value = reconnectGenerationStream(conversationId, row.id, {
+    onSnapshot: (assistantMessage) => {
+      Object.assign(reactiveRow, assistantMessage);
+      void scrollToBottom(true);
+    },
+    onDelta: ({ text }) => {
+      reactiveRow.content += text;
+      reactiveRow.status = 'streaming';
+      void scrollToBottom();
+    },
+    onDone: (assistantMessage) => {
+      Object.assign(reactiveRow, assistantMessage);
+      finish();
+    },
+    onFailed: (assistantMessage, message) => {
+      if (assistantMessage) {
+        // Orphaned (server restart) or failed generation — the row carries
+        // the honest terminal state from the DB.
+        Object.assign(reactiveRow, assistantMessage);
+      } else {
+        // Network-level failure while reconnecting — keep the partial row
+        // visible and remember it: when connectivity returns the
+        // online-watcher re-attaches to the same generation.
+        reactiveRow.status = 'interrupted';
+        networkRecoveryRowId.value = reactiveRow.id;
+      }
+      toast.error(message);
+      finish();
+    },
+  });
 }
 
 /** Retry a non-terminal assistant row by re-sending its user prompt with the same id. */
@@ -293,24 +410,30 @@ function retry(message: Message) {
   // The original user row already carries its clientMessageId (persisted).
   // Reusing it lets the backend recognise this as a replay and produce a
   // fresh assistant row without duplicating the user row.
-  void send(userRow.content, { clientMessageId: userRow.clientMessageId ?? undefined });
+  // The user row stays on screen (existingUserRowId suppresses the optimistic
+  // duplicate); reusing its clientMessageId makes the backend treat this as a
+  // replay — one user row, one fresh assistant row.
+  void send(userRow.content, {
+    clientMessageId: userRow.clientMessageId ?? undefined,
+    existingUserRowId: userRow.id,
+  });
 }
 
 function stopStreaming() {
   streamHandle.value?.abort();
-  // The aborted connection delivers no further events; the backend has
-  // already persisted the partial answer with status='interrupted' (no
-  // error event is emitted for disconnects). Reflect that locally and
-  // reload so the row matches the DB.
+  // Aborting only detaches THIS view from the live stream — the generation
+  // keeps running server-side and its full answer is persisted. The row is
+  // shown locally as detached; the next load of this conversation reads the
+  // final state from the database (or re-attaches if still generating).
   const row = streamingMessage.value;
   if (row) {
     row.status = 'interrupted';
-    if (!row.errorMessage) row.errorMessage = 'تولید پاسخ متوقف شد.';
+    row.errorMessage = null;
   }
   streaming.value = false;
   streamHandle.value = null;
+  activeStreamRowId.value = null;
   inflightClientMessageId.value = null;
-  void loadMessages();
   void loadConversations();
 }
 

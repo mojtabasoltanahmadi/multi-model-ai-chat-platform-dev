@@ -41,7 +41,13 @@ info:
     ```
 
     On the `error` event the backend has already persisted exactly one
-    assistant message with `status = "error"` containing any partial content.
+    assistant message with `status = "failed"` containing any partial content.
+
+    Client disconnects (network drop, tab close, Stop button) do NOT emit an
+    `error` event — the disconnector cannot receive it. The server persists
+    the partial answer with `status = "interrupted"`; the next `GET` on the
+    conversation surfaces the row as a Retry target. See
+    `docs/CONVERSATION_RESILIENCE.md` §5.
 
     **Business rules not expressible as schema constraints**
 
@@ -248,14 +254,21 @@ paths:
            no default configured → `400 NO_DEFAULT_MODEL`
 
         Then the stream opens (see the Streaming section in the API info):
-        `meta` → `delta`* → `done` | `error`. Exactly one assistant message is
+        `meta` → `delta`* → `done` | `failed`. Exactly one assistant message is
         persisted per turn in every outcome (INV-5). The provider request is
         aborted after the configured timeout (A-8, default 60s) and surfaces as
-        the generic `error` terminal event.
+        the generic `failed` terminal event.
+
+        The generation runs DETACHED from this HTTP response: a client
+        disconnect (refresh, closed tab, network loss) only unsubscribes — the
+        AI keeps generating and the row completes in the DB. A returning
+        client re-attaches via
+        `/conversations/{conversationId}/messages/{messageId}/stream`.
 
         The first message of an untitled conversation auto-sets its title (A-7).
       parameters:
         - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -274,16 +287,23 @@ paths:
           description: |
             SSE stream (`text/event-stream`). Event payloads use the
             `StreamMetaEvent`, `StreamDeltaEvent`, `StreamDoneEvent`, and
-            `StreamErrorEvent` schemas documented in components. If the client
-            disconnects mid-stream, the server persists the partial answer
-            with `status = "error"` and closes silently.
+            `StreamFailedEvent` schemas documented in components.
+
+            Disconnect handling: disconnect ≠ failure. The generation is
+            detached from the HTTP connection, so a mid-stream disconnect only
+            unsubscribes the client — the generation continues, keeps
+            persisting progress, and finishes `completed`. No error event is
+            emitted to the disconnector (it cannot receive one). Provider /
+            network failures persist with `status = "failed"` and emit a
+            generic `StreamFailedEvent`. See
+            `docs/CONVERSATION_RESILIENCE.md` §5 for the disambiguation.
           content:
             text/event-stream:
               schema:
                 type: string
               example: |
                 event: meta
-                data: {"userMessage":{"id":"e083f38c-155a-4ada-a85a-e04191d71831","conversationId":"3f7a9529-fcc2-4d6d-9723-ac6d69f928af","role":"user","content":"سلام","status":null,"errorMessage":null,"modelId":null,"createdAt":"2026-09-14T13:38:01.304Z"},"model":{"id":"84bc6ca9-b6c2-485f-828f-a48c32524759","name":"Mock GPT","provider":"mock"}}
+                data: {"userMessage":{"id":"e083f38c-155a-4ada-a85a-e04191d71831","conversationId":"3f7a9529-fcc2-4d6d-9723-ac6d69f928af","role":"user","content":"سلام","status":null,"errorMessage":null,"modelId":null,"clientMessageId":"cm-l8x9k-3a7b","createdAt":"2026-09-14T13:38:01.304Z"},"assistantMessage":{"id":"17d53156-1e46-4c61-b444-3ba9506b2d0b","conversationId":"3f7a9529-fcc2-4d6d-9723-ac6d69f928af","role":"assistant","content":"","status":"pending","errorMessage":null,"modelId":"84bc6ca9-b6c2-485f-828f-a48c32524759","clientMessageId":null,"createdAt":"2026-09-14T13:38:01.310Z"},"model":{"id":"84bc6ca9-b6c2-485f-828f-a48c32524759","name":"Mock GPT","provider":"mock"},"replay":false}
 
                 event: delta
                 data: {"text":"سلام! "}
@@ -292,7 +312,7 @@ paths:
                 data: {"text":"این یک پاسخ آزمایشی است."}
 
                 event: done
-                data: {"assistantMessage":{"id":"17d53156-1e46-4c61-b444-3ba9506b2d0b","conversationId":"3f7a9529-fcc2-4d6d-9723-ac6d69f928af","role":"assistant","content":"سلام! این یک پاسخ آزمایشی است.","status":"completed","errorMessage":null,"modelId":"84bc6ca9-b6c2-485f-828f-a48c32524759","createdAt":"2026-09-14T13:38:03.352Z"}}
+                data: {"assistantMessage":{"id":"17d53156-1e46-4c61-b444-3ba9506b2d0b","conversationId":"3f7a9529-fcc2-4d6d-9723-ac6d69f928af","role":"assistant","content":"سلام! این یک پاسخ آزمایشی است.","status":"completed","errorMessage":null,"modelId":"84bc6ca9-b6c2-485f-828f-a48c32524759","clientMessageId":null,"createdAt":"2026-09-14T13:38:03.352Z"}}
         '400':
           description: 'Validation failure, inactive model, or no default model. Codes: `VALIDATION_ERROR`, `MODEL_INACTIVE`, `NO_DEFAULT_MODEL`.'
           content:
@@ -309,6 +329,62 @@ paths:
                 $ref: '#/components/schemas/Error'
         '500':
           $ref: '#/components/responses/InternalError'
+
+  /conversations/{conversationId}/messages/{messageId}/stream:
+    get:
+      tags: [Chat]
+      operationId: reconnectGenerationStream
+      summary: Reconnect to an assistant message's generation (SSE recovery stream)
+      description: |
+        Recovery stream for a client that lost its live connection — refresh
+        mid-stream, closed tab, restored network, or a second tab opening the
+        same conversation. Never re-invokes the AI:
+
+        - live generation → `StreamSnapshotEvent` + remaining
+          `StreamDeltaEvent`s + `StreamDoneEvent`/`StreamFailedEvent`
+        - `completed` row → snapshot + done (pure replay)
+        - `failed`/`interrupted` row → snapshot + `StreamFailedEvent`
+        - `pending`/`streaming` row with NO live generation (server restarted
+          mid-generation) → the row is honestly marked `interrupted` in the DB,
+          then snapshot + `StreamFailedEvent`; the client can retry
+
+        Subscribe-first/snapshot-second ordering guarantees no token is lost
+        or duplicated: snapshot + deltas concatenate exactly to the persisted
+        content.
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - name: messageId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: |
+            SSE stream (`text/event-stream`): `snapshot` → `delta`* →
+            `done` | `failed`.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |
+                event: snapshot
+                data: {"assistantMessage":{"id":"17d53156-1e46-4c61-b444-3ba9506b2d0b","role":"assistant","content":"سلام! این یک","status":"streaming","errorMessage":null}}
+
+                event: delta
+                data: {"text":"پاسخ آزمایشی است."}
+
+                event: done
+                data: {"assistantMessage":{"id":"17d53156-1e46-4c61-b444-3ba9506b2d0b","role":"assistant","content":"سلام! این یک پاسخ آزمایشی است.","status":"completed","errorMessage":null}}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Unknown/foreign conversation, or the message is not an assistant row of it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /models:
     get:
@@ -537,6 +613,18 @@ components:
       schema:
         type: string
         format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Optional idempotency token. Mirror of `clientMessageId` on the request
+        body — the backend accepts either, with the body field taking precedence
+        when both are present. See `SendMessageRequest.clientMessageId` for the
+        replay / 400 semantics.
+      schema:
+        type: string
+        maxLength: 64
 
   responses:
     BadRequest:
@@ -703,21 +791,37 @@ components:
           enum: [user, assistant]
         content:
           type: string
-          description: For assistant messages with `status = "error"` this is the partial answer (possibly empty).
+          description: For assistant messages with a non-terminal or failure status, this is the partial answer (possibly empty).
         status:
           type: string
-          enum: [completed, error]
+          enum: [pending, streaming, completed, interrupted, failed]
           nullable: true
-          description: '`null` for user messages; distinguishes success from failure of an assistant turn (BR-8).'
+          description: |
+            `null` for user messages. For assistant messages:
+              * `pending` — row pre-persisted before first AI byte.
+              * `streaming` — AI is producing bytes (in-memory on the server).
+              * `completed` — full success.
+              * `interrupted` — client bailed out (network drop, tab close, Stop).
+                No `error` SSE event is emitted for this case.
+              * `failed` — provider / network failure (timeout, 5xx, refused).
+            Full state machine: docs/CONVERSATION_RESILIENCE.md §3.
         errorMessage:
           type: string
           nullable: true
-          description: Safe, client-displayable failure note for error-status assistant messages.
+          description: Server-side detail for `failed` rows. Stored on the server for debugging; the SSE `error` event sends a generic Persian copy that is safe for the UI.
         modelId:
           type: string
           format: uuid
           nullable: true
           description: Model that produced an assistant message; `null` for user messages and for messages whose model was later deleted.
+        clientMessageId:
+          type: string
+          maxLength: 64
+          nullable: true
+          description: |
+            Idempotency token set by the client on the original POST. Present on
+            user messages; used by the backend to recognize replays and to
+            reject content collisions with HTTP 400.
         createdAt:
           type: string
           format: date-time
@@ -741,6 +845,17 @@ components:
             use the default model. Authorization is re-verified on every
             send; a premium model requested by a FREE user is rejected with
             403 even via direct API calls.
+        clientMessageId:
+          type: string
+          maxLength: 64
+          description: |
+            Optional idempotency token. The same value may also be sent as
+            the `Idempotency-Key` HTTP header — both are accepted.
+              * No matching row → new user message persisted with this id.
+              * Match + matching content → replay (same user row, fresh
+                assistant row, `meta.replay = true`).
+              * Match + mismatched content → 400 in pre-flight
+                (`این پیام قبلاً با متن دیگری ارسال شده است.`).
 
     # ---- Models ----
     AiModel:
@@ -864,13 +979,25 @@ components:
 
     StreamMetaEvent:
       type: object
-      required: [userMessage, model]
-      description: First event; emitted once after the user message is persisted.
+      required: [userMessage, assistantMessage, model, replay]
+      description: |
+        First event; emitted once after the user message AND the assistant row
+        (with `status = "pending"`) are persisted. `assistantMessage.id` is
+        the real DB id — the client swaps its streaming placeholder for it
+        immediately.
       properties:
         userMessage:
           $ref: '#/components/schemas/Message'
+        assistantMessage:
+          $ref: '#/components/schemas/Message'
         model:
           $ref: '#/components/schemas/ModelSummary'
+        replay:
+          type: boolean
+          description: |
+            `true` when the request was treated as a retry (the supplied
+            `clientMessageId` matched an existing user row with the same
+            content). `false` on the first send for a given id.
 
     StreamDeltaEvent:
       type: object
@@ -888,14 +1015,37 @@ components:
         assistantMessage:
           $ref: '#/components/schemas/Message'
 
-    StreamErrorEvent:
+    StreamFailedEvent:
       type: object
-      required: [message]
-      description: Terminal failure event; a partial assistant message with `status = "error"` has been persisted. Message is generic Persian text; never contains provider details.
+      required: [assistantMessage, message]
+      description: |
+        Terminal failure event. The partial assistant message has been
+        persisted with `status = "failed"` (provider/network failure) or
+        `status = "interrupted"` (generation orphaned by a server restart,
+        surfaced via the reconnect stream). Message is generic Persian text;
+        never contains provider details.
+
+        NOT emitted on client disconnect — the disconnector cannot receive
+        it, and a disconnect does not fail the generation anyway. The row
+        completes in the DB and is recoverable via the reconnect stream.
       properties:
+        assistantMessage:
+          $ref: '#/components/schemas/Message'
         message:
           type: string
           example: 'سرویس هوش مصنوعی موقتاً در دسترس نیست. لطفاً دوباره تلاش کنید.'
+
+    StreamSnapshotEvent:
+      type: object
+      required: [assistantMessage]
+      description: |
+        Reconnect-stream only; always the first event. Carries the assistant
+        row with the FULL content accumulated so far — the client REPLACES its
+        copy with this (never appends). Every later delta is guaranteed to be
+        new: a token is either in the snapshot or in a delta, never both.
+      properties:
+        assistantMessage:
+          $ref: '#/components/schemas/Message'
 
     # ---- Error contract ----
     Error:

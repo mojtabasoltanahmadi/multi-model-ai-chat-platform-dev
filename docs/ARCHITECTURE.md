@@ -22,27 +22,36 @@ backend/src/
 users(id, email UNIQUE, password_hash, role)          role ∈ {user, admin}
 conversations(id, user_id → users, title, timestamps)  one owner per conversation
 messages(id, conversation_id → conversations, role,    role ∈ {user, assistant}
-         content, status, error_message, model_id,     status ∈ {completed, error} |
-         timestamps)                                   null for user messages
+         content, status, error_message, model_id,     status ∈ {pending, streaming,
+         client_message_id, timestamps)                completed, interrupted, failed} |
+                                                      null for user messages
 ai_models(id, name, provider, external_model_id,       provider ∈ {mock, openai-compatible}
           base_url, api_key, is_active, is_free, is_default)
 ```
 
 Foreign keys use `ON DELETE CASCADE` from messages→conversations→users, and
-`SET NULL` for message→model (history survives model deletion).
+`SET NULL` for message→model (history survives model deletion). The
+`client_message_id` column is indexed by `(conversation_id, role, client_message_id)`
+for idempotency lookup; the same token is allowed across conversations (no global
+unique constraint).
 
 ## Request flow for a chat turn
 
 ```
-POST /api/conversations/:id/messages  (JWT, JSON {content, modelId?})
+POST /api/conversations/:id/messages
+  (JWT, JSON {content, modelId?, clientMessageId?},
+   Idempotency-Key header mirrored from clientMessageId if present)
   │ ValidationPipe: boundary validation (non-blank, ≤ 4000 chars, UUIDs)
   │ JwtAuthGuard: authenticated user attached to request
   ▼
 MessagesController
   │ 1. assertChatTurnAllowed: conversation owned by caller + model resolvable
-  │    (throws 404/400 BEFORE the SSE response opens)
-  │ 2. persist user message
-  │ 3. SSE: meta → delta* → done | error        (one logical assistant message)
+  │    + idempotency lookup (replay or content-collision 400) — all 4xx-class
+  │    errors happen HERE, BEFORE the SSE headers flush
+  │ 2. flush SSE headers (200 text/event-stream)
+  │ 3. persist user message (with client_message_id)
+  │ 4. pre-persist assistant row with status='pending'
+  │ 5. SSE: meta → delta* → done | error        (one logical assistant message)
   ▼
 AiProviderService.streamChat(history, model)
      mock:                word-chunked canned Persian answer
@@ -52,15 +61,20 @@ AiProviderService.streamChat(history, model)
 
 ### Streaming invariant (one message per turn)
 
-An assistant row is created once per turn and mutated in memory while streaming:
+An assistant row is created once per turn — **before** the first SSE byte — and
+mutated in memory while streaming. Only terminal transitions hit the database:
 
 - success → saved with `status='completed'`, full content
-- provider error/timeout → saved with `status='error'`, partial content, internal
+- provider error/timeout → saved with `status='failed'`, partial content, internal
   `error_message` (server-side only); client gets a generic error event
-- client disconnect → stream aborted, partial content saved with `status='error'`
+- client disconnect (before any delta OR after some deltas) → saved with
+  `status='interrupted'`, partial content kept; **no error event** is emitted
+  because the disconnector cannot receive it
 
-Whatever the outcome, exactly one assistant row is persisted. The UI shows
-`⚠️ errorMessage` on error-status bubbles, keeping partial + error distinguishable.
+Whatever the outcome, exactly one assistant row is persisted. The UI surfaces
+`failed` and `interrupted` rows as Retry targets; see
+[CONVERSATION_RESILIENCE.md](CONVERSATION_RESILIENCE.md) for the full state
+machine and the disconnect-vs-failure disambiguation logic.
 
 ## Free-model access & plan authorization
 
@@ -117,6 +131,34 @@ At most one default model exists and it must be **active and free**:
 - Chat falls back to the default only if it exists, is active, and is allowed for the
   caller's plan; inactive, unknown, or unauthorized model ids are rejected before any
   message is persisted.
+
+## Resilience & recovery
+
+A chat conversation is the user's unit of value — refresh, tab close, network
+drop, multi-tab, or provider failure must all leave the user with a usable
+conversation on their next visit. The full spec lives in
+[CONVERSATION_RESILIENCE.md](CONVERSATION_RESILIENCE.md); the architectural
+seams it relies on:
+
+- **PostgreSQL is the source of truth.** Every bubble on screen was either
+  just emitted by the server or read back from `GET /conversations/:id`.
+  There is no purely-client "draft" row that can drift.
+- **Pre-persist invariant.** `assertChatTurnAllowed` runs all 4xx checks
+  before SSE headers flush. A successful request always leaves at least one
+  DB row per user message, even if the AI fails to start.
+- **Status state machine.** Assistant rows move through `pending → streaming
+  → completed | interrupted | failed`. `pending` is persisted (not just
+  in-memory) so a reload between POST and first delta still finds the row.
+  `streaming` is in-memory only; only terminal transitions hit the DB.
+- **Disconnect vs failure.** The server disambiguates an `AbortError` by
+  asking `isClientDisconnected()` first. Client-initiated aborts
+  (network drop, tab close, Stop button) become `interrupted`; genuine
+  provider failures become `failed`. See
+  [CONVERSATION_RESILIENCE.md §5](CONVERSATION_RESILIENCE.md#5-disconnect-vs-failure-disambiguation).
+- **Idempotency.** A `clientMessageId` on the body (or as the
+  `Idempotency-Key` HTTP header) makes the POST safely retryable. Reused
+  ids with matching content produce a replay (same user row, new assistant
+  row); mismatched content is rejected with 400 in pre-flight.
 
 ## Deliberate MVP trade-offs
 

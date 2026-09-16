@@ -238,8 +238,17 @@ Used in sidebar, chat header (mobile), auth brand panel, empty chat, admin heade
 * `chat/EmptyChat.vue` — brand mark, «سلام، آماده‌ای؟», supporting copy, 4 interactive
   prompt cards that send immediately.
 * `chat/MessageItem.vue` — user: soft accent block, `dir="auto"`. Assistant: workspace
-  content with model avatar/name/time meta, markdown body, streaming caret, copy action,
-  error note for failed turns. No heavy bubbles.
+  content with model avatar/name/time meta, markdown body, streaming caret, copy action.
+  Status variants:
+    * `completed` — full markdown body, copy action.
+    * `streaming` — progressive markdown + caret, no copy.
+    * `pending` (server has the row, no deltas yet on this tab) — muted in-progress
+      text + animated dots, `aria-live="polite"`.
+    * `interrupted` (client bailed out, partial content kept) — italic muted text +
+      primary-accent **تلاش مجدد** button as the first action.
+    * `failed` (provider / network failure) — red surface + `errorMessage` (server-side
+      detail never leaked) + primary-accent **تلاش مجدد** button.
+  Retry is disabled while another send is in flight. No heavy bubbles.
 * `chat/MessageComposer.vue` — rounded composer (radius-xl, focus ring), autosizing
   textarea (Enter=send, Shift+Enter=newline), disabled attachment button («به‌زودی»),
   model selector, send/stop, char counter near the 4000 limit, streaming status line.
@@ -285,7 +294,18 @@ validation (on-blur/submit), submit loading, error banner (`role="alert"`), swit
 
 Header (title + model) → message column (empty state / skeleton / messages) → composer.
 Loading: skeletons; empty: EmptyChat; streaming: placeholder message with caret + status
-line + stop button; errors: toast + per-message error note.
+line + stop button; errors: toast + per-message error note; **interrupted / failed rows
+surface a primary-accent Retry button (the first action) which re-sends the preceding
+user prompt with the same `clientMessageId` so the backend treats it as a replay**.
+
+An **offline banner** slides in under the chat header (200ms ease-out) when
+`navigator.onLine` flips false. It carries a pulsing red dot, is `role="status"`
+`aria-live="polite"`, and disappears the instant connectivity returns. The banner
+is a UI HINT — it never blocks sending (a request will still surface its own error).
+
+The **last-opened conversation** persists across reloads (`localStorage`
+`hooshyar.active-conversation`, UUID-validated). Foreign / deleted ids are
+silently cleared.
 
 ## Admin List
 
@@ -310,7 +330,9 @@ loading (spinner/skeleton). Forms add error. Lists add empty. See §11.
 * Keyboard: full tab order, Enter sends / Shift+Enter newline, Esc closes drawer/menu/modal.
 * Visible focus states globally (`:focus-visible`).
 * `aria-live` for toasts; `role="alert"` for form errors; `aria-current` on active
-  conversation; `aria-expanded/haspopup` on menus.
+  conversation; `aria-expanded/haspopup` on menus; `aria-live="polite"` on in-progress
+  assistant rows (pending / streaming with no live deltas on this tab) and on the
+  offline banner.
 * Contrast: body text ≥ 4.5:1 in both themes; accent-on-white 6.3:1.
 * `prefers-reduced-motion` disables animation globally (base.css).
 
@@ -403,11 +425,42 @@ Reason:   Differentiates the product from ChatGPT-style layouts; matches Persian
 Date:     2026-09-13
 Affected: MessageItem.vue.
 
-Decision: No regenerate action in the MVP
-Reason:   The backend has no regenerate endpoint; re-sending would duplicate the user
-          message in history. Revisit with backend support.
-Date:     2026-09-13
-Affected: MessageItem.vue (copy action only).
+Decision: Retry reuses the original `clientMessageId` and creates a new assistant row
+          (no row mutation, no in-place rewrite of history)
+Reason:   The backend's idempotency layer treats a matching id+content as a replay
+          (same user row, fresh assistant row, `meta.replay = true`). The user sees
+          their original question exactly once and gets a fresh answer below it —
+          matching the chat history they would expect after a refresh.
+Date:     2026-09-15
+Affected: MessageItem.vue, ChatView.vue, messages.service.ts.
+
+Decision: `interrupted` and `failed` rows surface a primary-accent Retry button as
+          the first action (not a generic error toast)
+Reason:   Disconnect vs failure are semantically different for the user (one is
+          expected — they clicked Stop; the other is unexpected — provider down).
+          Collapsing them into a single "error" path makes a deliberate Stop look
+          like a system failure. The retry button is the same control either way,
+          but the surface tone differs (italic muted for `interrupted`, red for
+          `failed`).
+Date:     2026-09-15
+Affected: MessageItem.vue.
+
+Decision: Offline banner is a hint, not a transport gate
+Reason:   `navigator.onLine` reports connectivity, not reachability — the browser
+          may say "online" while DNS / captive portals are broken. The banner keeps
+          the user informed; each request still surfaces its own error. Blocking
+          Send while offline would create a new mode (queued retry, deferred state)
+          that the MVP does not need.
+Date:     2026-09-15
+Affected: ChatView.vue, useOnline.ts.
+
+Decision: `errorMessage` (server-side detail) is never rendered verbatim to the client;
+          the client gets a generic Persian message and a non-leaky Retry button
+Reason:   Provider errors can contain tokens, URLs, internal class names. Showing
+          them to the user is a small information leak. The server stores them for
+          debugging; the UI shows the user-facing copy only.
+Date:     2026-09-15
+Affected: MessageItem.vue, messages.service.ts, api/client.ts.
 
 Decision: Inline SVG icons instead of an icon library
 Reason:   Fewer than 20 icons needed; zero dependencies; consistent stroke system.

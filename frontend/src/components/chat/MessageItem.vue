@@ -124,12 +124,24 @@ function retry() {
       <!-- eslint-disable-next-line vue/no-v-html — sanitized: markdown-it runs with html:false -->
       <div v-else class="message__content" v-html="html"></div>
 
-      <p v-if="(isFailed || isInterrupted) && message.errorMessage" class="message__error-note">
+      <!--
+        Status notes are fixed, user-safe Persian strings. The persisted
+        errorMessage is an internal ops detail (provider names, timeouts,
+        transport events) and is deliberately never rendered.
+      -->
+      <p v-if="isFailed" class="message__error-note" role="status">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
           <path d="M12 8h.01M12 12v5" />
           <circle cx="12" cy="12" r="9" />
         </svg>
-        {{ message.errorMessage }}
+        سرویس هوش مصنوعی موقتاً در دسترس نیست. لطفاً دوباره تلاش کنید.
+      </p>
+      <p v-else-if="isInterrupted" class="message__error-note" role="status">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <path d="M12 8h.01M12 12v5" />
+          <circle cx="12" cy="12" r="9" />
+        </svg>
+        تولید این پاسخ ناتمام ماند — می‌توانید دوباره تلاش کنید.
       </p>
     </div>
 
