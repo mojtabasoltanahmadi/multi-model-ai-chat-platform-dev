@@ -448,7 +448,7 @@ function logout() {
   flex-direction: column;
   height: 100%;
   padding: 1rem 0.85rem;
-  background: var(--surface);
+  background: var(--sidebar-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   overflow: hidden;
@@ -663,7 +663,7 @@ function logout() {
 }
 
 .admin-main__search-input:focus {
-  border-color: var(--accent);
+  border-color: var(--focus-border);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 

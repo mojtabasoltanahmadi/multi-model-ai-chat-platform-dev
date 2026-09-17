@@ -66,6 +66,14 @@
   --aurora-2: rgb(124 58 237 / 0.05);
   --aurora-3: rgb(14 165 233 / 0.04);
 
+  /* ---- Region tokens (default to the nearest surface; themes may diverge) ---- */
+  --sidebar-bg: var(--surface);
+  --composer-bg: var(--surface);
+  /* Cursor-reactive ambient light (AmbientGlow); alpha kept whisper-level. */
+  --cursor-glow: rgb(79 70 229 / 0.05);
+  /* Focus edge for fields/composer; themes may soften the alpha. */
+  --focus-border: var(--accent);
+
   /* ---- Layout ---- */
   --sidebar-width: 288px;
   --sidebar-collapsed-width: 3.5rem;
@@ -149,4 +157,82 @@
   --aurora-1: rgb(79 70 229 / 0.16);
   --aurora-2: rgb(124 58 237 / 0.12);
   --aurora-3: rgb(34 211 238 / 0.07);
+
+  --sidebar-bg: var(--surface);
+  --composer-bg: var(--surface);
+  --cursor-glow: rgb(99 91 255 / 0.07);
+  --focus-border: var(--accent);
+}
+
+/**
+ * Midnight — ChatGPT-inspired neutral dark: near-black charcoal with the
+ * faintest blue undertone, restrained borders, and the MultiAI blue/violet
+ * identity reserved for ~10% of the UI (CTA, active/selected, focus, brand).
+ * Flatter and quieter than the navy dark theme by design.
+ */
+:root[data-theme='midnight'] {
+  color-scheme: dark;
+
+  /* Blue replaces indigo as the working accent; fills stay for CTAs. */
+  --accent: #3b82f6;
+  --accent-hover: #549af8;
+  --accent-active: #2f6fd8;
+  --accent-text: #8ab4f9;
+  /* Active/selected surface: subtle blue tint (spec: rgba(59,130,246,.12)). */
+  --accent-soft: rgb(59 130 246 / 0.12);
+  --accent-soft-border: rgb(59 130 246 / 0.18);
+  --on-accent: #ffffff;
+
+  /* Neutral charcoal ladder with a whisper of blue. */
+  --bg: #0b0d0f;
+  --surface: #111315;
+  --surface-2: #17191c;
+  --surface-3: #1c1f22;
+  --surface-inset: #0e1012;
+
+  --text-1: #f5f5f5;
+  --text-2: #b4b7bc;
+  --text-3: #858990;
+  --text-disabled: #5f6368;
+  --text-on-accent-soft: #a8c7fa;
+
+  /* Hairline white borders instead of colored lines. */
+  --border: rgb(255 255 255 / 0.08);
+  --border-subtle: rgb(255 255 255 / 0.055);
+  --border-strong: rgb(255 255 255 / 0.13);
+
+  --success: #34c98b;
+  --success-soft: rgb(16 185 129 / 0.13);
+  --warning: #f0ad3f;
+  --warning-soft: rgb(245 158 11 / 0.13);
+  --danger: #ef4444;
+  --danger-hover: #f2596a;
+  --danger-soft: rgb(239 68 68 / 0.13);
+  --info: #22d3ee;
+  --info-soft: rgb(34 211 238 / 0.12);
+
+  /* Quiet black elevation — hierarchy comes from surface steps, not shadow. */
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.35);
+  --shadow-2: 0 2px 8px rgb(0 0 0 / 0.4), 0 1px 2px rgb(0 0 0 / 0.3);
+  --shadow-3: 0 8px 24px rgb(0 0 0 / 0.45), 0 2px 6px rgb(0 0 0 / 0.35);
+  --shadow-overlay: 0 16px 48px rgb(0 0 0 / 0.6);
+
+  /* Same brand gradient, markedly softer glow. */
+  --gradient-primary: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+  --gradient-primary-hover: linear-gradient(135deg, #4f8ef7 0%, #9a6ef0 100%);
+  --shadow-glow: 0 4px 14px rgb(59 130 246 / 0.18);
+  --shadow-glow-strong: 0 6px 20px rgb(59 130 246 / 0.24);
+  --overlay: rgb(0 0 0 / 0.6);
+  --surface-glass: rgb(11 13 15 / 0.82);
+  /* Aurora barely-there: the theme must survive with gradients removed. */
+  --aurora-1: rgb(59 130 246 / 0.05);
+  --aurora-2: rgb(139 92 246 / 0.04);
+  --aurora-3: rgb(34 211 238 / 0.025);
+
+  /* Sidebar sinks into the app background; composer rides one step up. */
+  --sidebar-bg: #0b0d0f;
+  --composer-bg: #17191c;
+  --cursor-glow: rgb(59 130 246 / 0.045);
+  /* Translucent focus edge per spec (rgba(59,130,246,.45)-family). */
+  --focus-border: rgb(59 130 246 / 0.5);
 }

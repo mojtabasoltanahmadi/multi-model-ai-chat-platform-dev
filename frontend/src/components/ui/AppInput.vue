@@ -122,7 +122,7 @@ function onInput(event: Event) {
 }
 
 .app-field__input:focus {
-  border-color: var(--accent);
+  border-color: var(--focus-border);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
