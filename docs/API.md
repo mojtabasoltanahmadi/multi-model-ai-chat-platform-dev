@@ -35,7 +35,7 @@ JWT payload: `{ sub: userId, email, role }`, expires in `JWT_EXPIRES_IN` (defaul
 - `clientMessageId` optional; opaque client-generated token (≤ 64 chars) used for idempotency.
   The same value may also be sent as the `Idempotency-Key` HTTP header — both are accepted,
   the header is just a convenience for proxies and replay logs.
-- `fileIds` optional; up to 5 **`READY`** files **of this conversation** whose extracted text is
+- `fileIds` optional; up to 6 **`READY`** files **of this conversation** whose extracted text is
   added to the prompt. Any id that is unknown, belongs to another conversation/user, or is not
   `READY` rejects the send with 400 (before the stream starts). See
   [FILES.md](FILES.md#chat-integration).
@@ -172,7 +172,7 @@ interface Message {
 | POST | `/conversations/:conversationId/files` | `multipart/form-data`, field `file`. **201** with the safe file shape. Foreign conversation → 404; empty/unsupported/mismatched content → 400; over the size limit → 413. Extraction never happens in this request. |
 | GET | `/conversations/:conversationId/files` | files of one conversation, oldest first (used to restore statuses after a refresh) |
 | GET | `/files/:fileId` | one file — the polling endpoint; foreign file → 404 |
-| GET | `/files/:fileId/content` | owner-only bytes used for thumbnails, the preview viewer and downloads. Images/PDF are `Content-Disposition: inline` (plus `X-Content-Type-Options: nosniff`); everything else, or `?download=1`, is an `attachment`. Foreign file → 404, missing object → 404, no token → 401. |
+| GET | `/files/:fileId/content` | owner-only bytes used for thumbnails, the preview viewer and downloads. Images/PDF are `Content-Disposition: inline` (plus `X-Content-Type-Options: nosniff`); everything else, or `?download=1`, is an `attachment`, with the original name echoed as `filename*=UTF-8''…` so non-ASCII names survive. Foreign file → 404, missing object → 404, no token → 401. |
 | GET | `/admin/files?status=&limit=&offset=` | **admin** — `{ total, counts: {UPLOADING, PROCESSING, READY, FAILED, total}, items[] }` with user email + conversation title |
 | GET | `/admin/files/stats` | **admin** — `{ counts, queue: { waiting, active, failed, completed } \| null }` |
 | POST | `/admin/files/:fileId/reprocess` | **admin** — the only path from `READY`/`FAILED` back to `PROCESSING`; 400 for any other status |

@@ -552,3 +552,41 @@ actually loading.
   no files at all.
 - `vue-tsc --noEmit` clean; production build clean. Backend untouched this round (169/169 still
   green from Stage 14; the file E2E and Day 1–4 regression are unaffected by UI-only edits).
+
+## Stage 16 — Chip density, the six-file cap and a filename-decoding fix
+
+Second UI feedback round on the same flow: chips were too wide (three per line, with their
+status words like «آماده» / «در حال آپلود» eating the row), nothing capped how many files could
+be attached, and the send button had to stay locked until every chosen file finishes uploading
+while typing stays possible.
+
+**Changes**
+- A chip is now icon + name + icon-only status + × (~125 px): the status words moved into the
+  tooltip and the accessible name, the name cap dropped to 4.2rem, the thumbnail to 1.3rem, and
+  `flex: 0 0 auto` makes chips wrap at their natural width instead of being crushed in a narrow
+  panel. Five chips fit one row at `--chat-measure` (736px).
+- Composer buttons shrank (2.3rem → 2.15rem) and the upload notice line is gone — the spinner on
+  each chip is the progress, and the disabled send button explains itself through its title.
+- Six-file ceiling per message: `DEFAULT_MAX_FILES_PER_MESSAGE` is shared by the DTO and the
+  service, `FILE_MAX_PER_MESSAGE=6`, and the picker trims a batch to the remaining slots with a
+  Persian toast so the limit is felt before the server has to reject anything.
+- Send stays locked until every picked file finishes uploading while the textarea stays editable;
+  a merely *processing* file still never blocks the message.
+
+**Real bug found while verifying in the browser (not by reading code)**
+- **Persian filenames were stored as mojibake.** Multipart names travel as raw bytes and busboy
+  (behind multer) decodes them as latin1, so `عکس-نمونه.png` became `Ø¹Ú©Ø³-Ù†Ù…ÙˆÙ†Ù‡.png` — in the
+  database, in the chip and in the download header. Added `decodeUploadFilename` at the
+  controller boundary (re-reads the same bytes as UTF-8, leaves ASCII and genuinely latin1 names
+  untouched) with unit tests, plus two E2E checks that a Persian name survives upload, storage
+  and `Content-Disposition`.
+
+**Verification**
+- Backend: 174/174 unit tests; file E2E 53/53 (including the two new name checks); Day 1–4 smoke
+  75/75 with the default model restored to `hoshyar` afterwards.
+- Browser: a six-file batch rendered one row of 5 + 1 at the real composer width (3 + 3 in the
+  narrow preview pane), no status words anywhere in the row, draft typed while a transfer ran,
+  `SEND-LOCKED` sampled during the upload and open afterwards, an over-cap batch trimmed to six
+  with «حداکثر ۶ فایل…», a file-only send that produced its message with chips, an image chip with
+  a live thumbnail, and a viewer opening with `backdrop-filter: blur(10px)` plus a working
+  download. Persian names round-tripped correctly once the fix was live.

@@ -258,16 +258,20 @@ Used in sidebar, chat header (mobile), auth brand panel, empty chat, admin heade
 * File row (inside `MessageComposer.vue`) — the files being written into the message render
   **inside the composer box**, in a wrapping row above the text row, separated by a hairline
   (`--border-subtle`): the box grows to hold them instead of the chips living in a second
-  surface. No title, count, badge or explanatory copy — the chips speak for themselves and each
-  carries its own ×; the only extra line is the upload notice while a transfer is running.
-* `chat/FileChip.vue` — one file: thumbnail (`--radius-sm`, 2.5rem, `object-fit: cover`) for
-  images, otherwise a kind icon (document / sheet / image, inline SVG), an ellipsized name, an
-  `LTR` size and a status affordance — pulsing spinner «در حال آپلود…» / «در حال پردازش…», check
-  «آماده», cross «پردازش ناموفق». Tone follows the semantic palette (`--info-soft` while
-  working, `--success-soft` when ready, `--danger-soft` on failure) and matches the admin status
-  pills. `role="status"`; the tooltip carries the safe failure reason. A `READY` chip becomes a
-  button that opens the viewer (hover reveals an eye affordance); a removable chip carries a ×
-  that clears the inline-end corner without shifting the layout.
+  surface. No title, count, badge or explanatory copy — not even an upload notice: the spinner on
+  each chip is the progress, and the disabled Send button explains itself through its title and
+  `aria-label`. Typing stays possible while a transfer runs; only sending waits.
+* `chat/FileChip.vue` — one file, deliberately small (~125 px) so four to five share one row:
+  thumbnail (`--radius-xs`, 1.3rem, `object-fit: cover`) for images, otherwise a compact kind
+  icon (document / sheet / image, inline SVG, 11px), an ellipsized name capped at 4.2rem, and an
+  **icon-only** status affordance — pulsing spinner while uploading/processing, check when ready,
+  cross on failure. No status *words* are rendered: the tooltip (`name — size — status`, plus the
+  safe failure reason) and the accessible name carry them, which is what lets several chips fit
+  on a line. `flex: 0 0 auto` means chips wrap at their natural width instead of being crushed in
+  a narrow panel. Tone follows the semantic palette (`--info-soft` while working,
+  `--success-soft` when ready, `--danger-soft` on failure) and matches the admin status pills.
+  `role="status"`; a `READY` chip becomes a button that opens the viewer; a removable chip
+  carries its own × (aria-label «حذف فایل …») without shifting the layout.
 * `chat/FileViewerModal.vue` — full-screen preview sheet: overlay at `--z-modal` with a 10px
   `backdrop-filter: blur` so the conversation stays visible but out of focus; panel
   `min(62rem, 100%)`. Header = kind badge + filename + size + a danger-tinted × close;
@@ -329,9 +333,9 @@ An **offline banner** slides in under the chat header (200ms ease-out) when
 `aria-live="polite"`, and disappears the instant connectivity returns. The banner
 is a UI HINT — it never blocks sending (a request will still surface its own error).
 
-**Attachments** live in the tray above the composer (see `AttachmentTray`). The upload starts
-the moment files are picked, so «در حال آپلود…» reflects a real request, and the status only
-advances to «آماده» when the backend says `READY` — the UI never optimistically claims success.
+**Attachments** live inside the composer box (see the file row above). The upload starts the
+moment files are picked, so the chip's spinner reflects a real request, and the chip only turns
+into a success tint when the backend says `READY` — the UI never optimistically claims success.
 While any chip is non-terminal the view polls the file status endpoint; after a reload the chips
 and their statuses are rebuilt from the conversation's file list (never from memory). A failed
 chip keeps a red tone and its reason, and sending with a non-ready chip is refused with a clear
@@ -575,6 +579,16 @@ Reason:   Ownership is already enforced per request in the backend, MinIO stays 
           file feature follows. The cost (bytes through the backend) is acceptable at MVP scale.
 Date:     2026-09-16
 Affected: files.controller.ts, FileViewerModal.vue, api/client.ts.
+
+Decision: Chip status is an icon, never a word, and a message carries at most six chips
+Reason:   Chips sit inside the message box the user is typing in, so every word spent on
+          «آماده» / «در حال آپلود…» costs space the draft needs: the words moved into the tooltip
+          and the accessible name, the visible chip kept its icon, and the name cap dropped far
+          enough that four to five chips fit one row at `--chat-measure`. The six-file ceiling
+          mirrors `FILE_MAX_PER_MESSAGE` in the picker (trimming a batch with a toast) so the
+          limit is felt before the server has to reject a request.
+Date:     2026-09-17
+Affected: FileChip.vue, MessageComposer.vue, ChatView.vue, api/client.ts.
 ```
 
 ---

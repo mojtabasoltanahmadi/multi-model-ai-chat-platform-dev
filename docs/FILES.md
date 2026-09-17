@@ -46,6 +46,13 @@ Only the extension is never trusted on its own — it is a third, independent si
 separators and control characters are stripped from the display name, and a whitespace-only
 name becomes `بدون‌نام`.
 
+**Non-ASCII names.** Multipart filenames travel as raw bytes in a header, and busboy (behind
+multer) decodes them as latin1, so `عکس-نمونه.png` reached the service as
+`Ø¹Ú©Ø³-Ù†Ù…ÙˆÙ†Ù‡.png` — the mojibake was then shown to the user and stored in the database.
+`decodeUploadFilename` repairs the name at the controller boundary by re-reading the same bytes
+as UTF-8; ASCII names and genuinely latin1 names are left untouched, so no client is made worse
+off. The download path then echoes the real name via `filename*=UTF-8''…`.
+
 ## File lifecycle (state machine)
 
 ```
@@ -121,7 +128,7 @@ The safe shape returned for a file is
 **`extractedText` and `storageKey` never leave the backend** — the extracted text is only ever
 consumed server-side when building the AI prompt.
 
-Sending a message with attachments adds `fileIds: string[]` (≤ 5, uuids) to the existing
+Sending a message with attachments adds `fileIds: string[]` (≤ 6, uuids) to the existing
 `POST /conversations/:id/messages` body; the persisted user message stores them in
 `messages.attached_file_ids` (jsonb) so the UI can re-render the chips after a reload.
 
@@ -142,6 +149,13 @@ Sending a message with attachments adds `fileIds: string[]` (≤ 5, uuids) to th
   box grows to hold them, each chip removes itself with its ×, and no counter/label copy is
   shown. Allowed types and the size cap are not repeated in the UI — the backend is the source
   of truth and a rejected file comes back as a clear Persian message.
+- **Compact chips, capacity mirroring the backend.** A chip is icon + ellipsized name + an
+  icon-only status affordance + × (~125 px), so five fit on one row at the composer's full
+  `--chat-measure` width and nothing has to be spelled out in words: the spinner, the check and
+  the cross carry the state, and the tooltip holds the words (name — size — status, plus the
+  safe failure reason). The picker accepts at most `MAX_FILES_PER_MESSAGE` (6) chips per message:
+  a batch is trimmed to the remaining slots with a Persian toast (and the backend independently
+  bounds `fileIds`, so a crafted request cannot exceed the cap).
 - **Retrying a failed answer keeps that turn's files** (`attachedFileIds` of the user row are
   resent with the same idempotency token), so a retry never quietly drops the attachments it was
   asked about.
@@ -266,7 +280,7 @@ recoverable without manual SQL.
 |---|---|---|
 | `FILE_MAX_SIZE_BYTES` | `10485760` (10 MB) | per-file upload cap (multer + service) |
 | `FILE_MAX_CONTEXT_CHARS` | `24000` | extracted text budget per message |
-| `FILE_MAX_PER_MESSAGE` | `5` | attachments per message |
+| `FILE_MAX_PER_MESSAGE` | `6` | attachments per message |
 | `FILE_PROCESSING_TIMEOUT_MS` | `120000` | bound on one extraction run |
 | `FILE_STALE_PROCESSING_MS` | `600000` | sweeper threshold for orphaned `PROCESSING` rows |
 | `MINIO_ENDPOINT` / `MINIO_PORT` / `MINIO_USE_SSL` | `localhost` / `9000` / `false` | object storage |
@@ -334,13 +348,13 @@ operational view.
 
 ## Verification
 
-- `backend`: 169 unit tests (`npx jest`) — validation, state machine, extraction (real PDF +
+- `backend`: 174 unit tests (`npx jest`) — validation, state machine, extraction (real PDF +
   real xlsx + mocked OCR), processor (idempotency, permanent vs transient, retry exhaustion,
-  sweeper), upload/ownership/context rules, `Content-Disposition` hardening, content-stream
-  authorization, and the Day 1–4 suites.
-- `scripts/file-processing-test.mjs` — 51 end-to-end checks against a live stack (upload PDF /
+  sweeper), upload/ownership/context rules, `Content-Disposition` hardening, multipart filename
+  decoding, content-stream authorization, and the Day 1–4 suites.
+- `scripts/file-processing-test.mjs` — 53 end-to-end checks against a live stack (upload PDF /
   Excel / image → READY, corrupt file → FAILED, validation, cross-user denial, admin view,
-  reprocess, refresh recovery, chat while a file is still `PROCESSING`, and the preview/download
-  contract: owner bytes, inline vs attachment disposition, `nosniff`, no storage key in the
-  response, foreign/anonymous denial).
+  reprocess, refresh recovery, chat while a file is still `PROCESSING`, a Persian filename that
+  must survive upload and download, and the preview/download contract: owner bytes, inline vs
+  attachment disposition, `nosniff`, no storage key in the response, foreign/anonymous denial).
 - `scripts/smoke-test.mjs` — the Day 1–4 regression suite, 75/75 green after this feature.
