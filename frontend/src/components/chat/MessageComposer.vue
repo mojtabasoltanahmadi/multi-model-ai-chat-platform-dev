@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue';
 import ModelSelector from './ModelSelector.vue';
 import FileChip from './FileChip.vue';
 import { ACCEPTED_FILE_TYPES } from '../../api/client';
-import type { AiModel, ChatFile } from '../../api/types';
+import type { AiModel, ChatFile, ComposerFile } from '../../api/types';
 
 const MAX_LENGTH = 4000;
 
@@ -11,14 +11,12 @@ interface Props {
   models: AiModel[];
   modelId: string;
   streaming: boolean;
-  /** Files added to the next message (any lifecycle status). */
-  attachments?: ChatFile[];
-  /** How many of those files are still uploading. */
-  uploadingCount?: number;
+  /** Files added to the next message, each with its own upload state. */
+  attachments?: ComposerFile[];
   /** Object URLs for image thumbnails, keyed by file id. */
   previews?: Record<string, string>;
   /** Asks the view to fetch a thumbnail for a file restored from the server. */
-  requestPreview?: (file: ChatFile) => void;
+  requestPreview?: (file: ComposerFile) => void;
   disabled?: boolean;
   /** Shown when no conversation is active — sending will create one. */
   hint?: string;
@@ -28,7 +26,6 @@ const props = withDefaults(defineProps<Props>(), {
   disabled: false,
   hint: '',
   attachments: () => [],
-  uploadingCount: 0,
   previews: () => ({}),
   requestPreview: undefined,
 });
@@ -38,6 +35,7 @@ const emit = defineEmits<{
   'update:modelId': [id: string];
   attach: [files: File[]];
   'remove-attachment': [fileId: string];
+  'retry-upload': [fileId: string];
   'open-file': [file: ChatFile];
 }>();
 
@@ -45,22 +43,40 @@ const draft = ref('');
 const textarea = ref<HTMLTextAreaElement | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
 
-const uploading = computed(() => props.uploadingCount > 0);
+/** Files with an upload still outstanding: queued, in flight, or failed. */
+const uploadsPending = computed(() =>
+  props.attachments.filter((file) => file.upload !== 'completed'),
+);
 
-/** Files whose content already exists, so they can carry a message on their own. */
-const readyAttachments = computed(() => props.attachments.filter((file) => file.status === 'READY'));
+const failedUpload = computed(
+  () => uploadsPending.value.find((file) => file.upload === 'error') ?? null,
+);
+
+/** Uploaded files whose content is ready, so they can carry a message alone. */
+const readyAttachments = computed(() =>
+  props.attachments.filter((file) => file.upload === 'completed' && file.status === 'READY'),
+);
 
 /**
- * A file on its own is enough to send: an upload in flight is the only thing
- * that blocks the button, because those files are not in the conversation yet.
+ * Send is locked until every picked file has been uploaded — typing a message
+ * does not unlock it. A failed upload also keeps it locked until the user
+ * retries or removes that file. Server-side processing never blocks the chat,
+ * and a message without files behaves exactly as before.
  */
 const canSend = computed(
   () =>
     !props.disabled &&
     !props.streaming &&
-    !uploading.value &&
+    uploadsPending.value.length === 0 &&
     (draft.value.trim().length > 0 || readyAttachments.value.length > 0),
 );
+
+/** Why Send is locked; the button's tooltip and accessible name say it. */
+const sendLockReason = computed(() => {
+  if (failedUpload.value) return 'آپلود یک فایل ناموفق بود؛ دوباره تلاش کنید یا فایل را حذف کنید.';
+  if (uploadsPending.value.length > 0) return 'تا پایان آپلود همهٔ فایل‌ها امکان ارسال نیست.';
+  return '';
+});
 
 function pickFiles() {
   fileInput.value?.click();
@@ -134,10 +150,13 @@ defineExpose({ focus: () => textarea.value?.focus() });
           :error-message="file.errorMessage"
           :preview-url="previews[file.id] ?? null"
           :request-preview="requestPreview ? () => requestPreview?.(file) : undefined"
-          :clickable="file.status === 'READY'"
+          :upload="file.upload"
+          :upload-error="file.uploadError"
+          :clickable="file.upload === 'completed' && file.status === 'READY'"
           removable
           @open="emit('open-file', file)"
           @remove="emit('remove-attachment', file.id)"
+          @retry="emit('retry-upload', file.id)"
         />
       </div>
 
@@ -147,7 +166,7 @@ defineExpose({ focus: () => textarea.value?.focus() });
           class="composer__attach"
           :disabled="disabled"
           aria-label="افزودن فایل (PDF، Excel یا تصویر)"
-          title="افزودن فایل — می‌توانید چند فایل را همزمان انتخاب کنید"
+          title="افزودن فایل "
           @click="pickFiles"
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
@@ -155,6 +174,10 @@ defineExpose({ focus: () => textarea.value?.focus() });
           </svg>
         </button>
 
+        <!--
+          Never disabled while files upload: only Send locks, so the draft keeps
+          its text and the user can write (and edit) the whole time.
+        -->
         <textarea
           ref="textarea"
           v-model="draft"
@@ -192,8 +215,8 @@ defineExpose({ focus: () => textarea.value?.focus() });
             type="button"
             class="composer__send"
             :disabled="!canSend"
-            :aria-label="uploading ? 'تا پایان آپلود امکان ارسال نیست' : 'ارسال پیام'"
-            :title="uploading ? 'تا پایان آپلود امکان ارسال نیست' : 'ارسال پیام'"
+            :aria-label="sendLockReason || 'ارسال پیام'"
+            :title="sendLockReason || 'ارسال پیام'"
             @click="send"
           >
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

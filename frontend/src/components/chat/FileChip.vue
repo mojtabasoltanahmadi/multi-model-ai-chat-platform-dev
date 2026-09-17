@@ -2,7 +2,7 @@
 import { computed, onMounted } from 'vue';
 import { formatBytes } from '../../utils/format';
 import { fileKind } from '../../utils/fileKind';
-import type { ChatFileStatus } from '../../api/types';
+import type { ChatFileStatus, FileUploadState } from '../../api/types';
 
 interface Props {
   name: string;
@@ -17,6 +17,13 @@ interface Props {
   removable?: boolean;
   /** Opens the viewer when clicked (only meaningful for READY files). */
   clickable?: boolean;
+  /**
+   * Client-side upload state (composer chips only). Omitted for files restored
+   * from history, where the server status is the only thing that matters.
+   */
+  upload?: FileUploadState | null;
+  /** Upload failure reason (retryable), shown instead of the server message. */
+  uploadError?: string | null;
   /** Object URL of an image thumbnail, when one is already available. */
   previewUrl?: string | null;
   /** Asks the parent to fetch a thumbnail lazily (images without a preview). */
@@ -29,11 +36,13 @@ const props = withDefaults(defineProps<Props>(), {
   errorMessage: null,
   removable: false,
   clickable: false,
+  upload: null,
+  uploadError: null,
   previewUrl: null,
   requestPreview: undefined,
 });
 
-defineEmits<{ remove: []; open: [] }>();
+defineEmits<{ remove: []; open: []; retry: [] }>();
 
 const kind = computed(() => fileKind({ originalName: props.name, mimeType: props.mimeType }));
 
@@ -41,34 +50,47 @@ const kind = computed(() => fileKind({ originalName: props.name, mimeType: props
 const showThumbnail = computed(() => kind.value === 'image' && Boolean(props.previewUrl));
 
 /**
- * Status is carried by an icon alone — the chip stays narrow enough to fit
- * several files per row. The words live in the tooltip and the accessible name.
+ * One glyph carries the state: queued, working, uploaded (✓) or failed (✗).
+ * Once the upload finished, the server lifecycle takes over — a file that later
+ * fails extraction still shows the cross.
  */
-const statusLabel = computed(() => {
-  switch (props.status) {
-    case 'UPLOADING':
-      return 'در حال آپلود';
-    case 'PROCESSING':
-      return 'در حال پردازش';
-    case 'READY':
-      return 'آماده';
-    case 'FAILED':
-      return 'پردازش ناموفق';
-    default:
-      return '';
-  }
+const state = computed<'queued' | 'working' | 'done' | 'failed'>(() => {
+  if (props.upload === 'pending') return 'queued';
+  if (props.upload === 'error') return 'failed';
+  if (props.upload === 'uploading') return 'working';
+  if (props.upload === 'completed') return props.status === 'FAILED' ? 'failed' : 'done';
+  if (props.status === 'READY') return 'done';
+  if (props.status === 'FAILED') return 'failed';
+  return 'working';
 });
 
-const statusModifier = computed(() => `file-chip--${props.status.toLowerCase()}`);
+/** Only a client-side upload failure can be sent again from here. */
+const canRetry = computed(() => props.upload === 'error');
 
 /**
  * The words live in the tooltip and the accessible name only: the visible chip
  * is icon + truncated file name, so several files share one row.
  */
+const stateLabel = computed(() => {
+  switch (state.value) {
+    case 'queued':
+      return 'در انتظار آپلود';
+    case 'working':
+      return props.upload === 'uploading' ? 'در حال آپلود' : 'در حال پردازش';
+    case 'done':
+      return props.status === 'READY' ? 'آماده' : 'آپلود شد';
+    default:
+      return props.upload === 'error' ? 'آپلود ناموفق' : 'پردازش ناموفق';
+  }
+});
+
+const errorText = computed(() => props.uploadError ?? props.errorMessage ?? '');
+
 const title = computed(() => {
   const size = props.size > 0 ? formatBytes(props.size) : '';
-  const parts = [props.name, size, statusLabel.value].filter(Boolean);
-  if (props.status === 'FAILED' && props.errorMessage) parts.push(props.errorMessage);
+  const parts = [props.name, size, stateLabel.value].filter(Boolean);
+  if (errorText.value) parts.push(errorText.value);
+  if (canRetry.value) parts.push('برای تلاش دوباره کلیک کنید');
   return parts.join(' — ');
 });
 
@@ -81,7 +103,7 @@ onMounted(() => {
 <template>
   <span
     class="file-chip"
-    :class="[statusModifier, { 'file-chip--media': showThumbnail, 'file-chip--openable': clickable }]"
+    :class="[`file-chip--${state}`, { 'file-chip--media': showThumbnail, 'file-chip--openable': clickable }]"
     role="status"
     :aria-label="title"
   >
@@ -148,14 +170,25 @@ onMounted(() => {
 
       <span class="file-chip__name">{{ name }}</span>
 
-      <!-- status: spinner while working, check when ready, cross on failure -->
+      <!-- status: clock while queued, spinner while transferring, then ✓ / ✗ -->
       <span class="file-chip__state" aria-hidden="true">
-        <span
-          v-if="status === 'UPLOADING' || status === 'PROCESSING'"
-          class="file-chip__spinner"
-        ></span>
         <svg
-          v-else-if="status === 'READY'"
+          v-if="state === 'queued'"
+          width="11"
+          height="11"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M12 7.5V12l3 2" />
+        </svg>
+        <span v-else-if="state === 'working'" class="file-chip__spinner"></span>
+        <svg
+          v-else-if="state === 'done'"
           width="11"
           height="11"
           viewBox="0 0 24 24"
@@ -181,6 +214,30 @@ onMounted(() => {
         </svg>
       </span>
     </component>
+
+    <button
+      v-if="canRetry"
+      type="button"
+      class="file-chip__retry"
+      :aria-label="`تلاش دوباره برای آپلود ${name}`"
+      :title="`تلاش دوباره برای آپلود ${name}`"
+      @click="$emit('retry')"
+    >
+      <svg
+        width="10"
+        height="10"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2.2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M21 12a9 9 0 1 1-3-6.7" />
+        <path d="M21 4v5h-5" />
+      </svg>
+    </button>
 
     <button
       v-if="removable"
@@ -220,17 +277,22 @@ onMounted(() => {
   padding-inline-start: 0.18rem;
 }
 
-.file-chip--ready {
-  background: var(--success-soft);
-  color: var(--success);
-  border-color: color-mix(in srgb, var(--success) 25%, transparent);
+/* Waiting for its turn: muted, so the file being uploaded stands out. */
+.file-chip--queued {
+  border-style: dashed;
+  color: var(--text-3);
 }
 
-.file-chip--processing,
-.file-chip--uploading {
+.file-chip--working {
   background: var(--info-soft);
   color: var(--info);
   border-color: color-mix(in srgb, var(--info) 25%, transparent);
+}
+
+.file-chip--done {
+  background: var(--success-soft);
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 25%, transparent);
 }
 
 .file-chip--failed {
@@ -313,6 +375,27 @@ onMounted(() => {
   to {
     rotate: 360deg;
   }
+}
+
+.file-chip__retry {
+  display: grid;
+  place-items: center;
+  width: 0.95rem;
+  height: 0.95rem;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  opacity: 0.75;
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out);
+}
+
+.file-chip__retry:hover {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 18%, transparent);
 }
 
 .file-chip__remove {

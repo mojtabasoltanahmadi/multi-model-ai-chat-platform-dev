@@ -82,6 +82,25 @@ export interface ChatFile {
   updatedAt: string;
 }
 
+/**
+ * Client-side upload lifecycle of a composer chip. Independent of the server
+ * status: a file can be `completed` here (fully uploaded) while the backend is
+ * still `PROCESSING` its content.
+ */
+export type FileUploadState = 'pending' | 'uploading' | 'completed' | 'error';
+
+/**
+ * A file waiting in the composer: the server record (once it exists) plus the
+ * local upload bookkeeping the chip renders. `source` is the picked File, kept
+ * so a failed upload can be retried without asking the user to pick it again.
+ */
+export interface ComposerFile extends ChatFile {
+  upload: FileUploadState;
+  /** Client-side upload failure reason — distinct from a processing failure. */
+  uploadError?: string | null;
+  source?: File;
+}
+
 /** Admin file view row: the file plus owner/conversation context. */
 export interface AdminChatFile extends ChatFile {
   userEmail: string | null;
