@@ -163,7 +163,7 @@ defineExpose({ focus: () => textarea.value?.focus() });
   max-width: var(--chat-measure);
   margin-inline: auto;
   padding: 0.6rem 0.65rem 0.55rem;
-  background: var(--surface);
+  background: var(--composer-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-2);
@@ -173,7 +173,7 @@ defineExpose({ focus: () => textarea.value?.focus() });
 }
 
 .composer__box:focus-within {
-  border-color: var(--accent);
+  border-color: var(--focus-border);
   box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-glow);
 }
 
