@@ -49,7 +49,7 @@ const emit = defineEmits<{ 'update:modelId': [id: string]; openMenu: [] }>();
   gap: 0.7rem;
   height: 3.6rem;
   padding: 0 1.2rem;
-  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  background: var(--surface-glass);
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--border-subtle);
 }

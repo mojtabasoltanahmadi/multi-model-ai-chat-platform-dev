@@ -1,5 +1,8 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import BrandMark from '../ui/BrandMark.vue';
+import { useAuth } from '../../composables/useAuth';
+import { displayNameFromEmail } from '../../utils/format';
 
 interface Suggestion {
   icon: string;
@@ -8,6 +11,14 @@ interface Suggestion {
 }
 
 const emit = defineEmits<{ pick: [prompt: string] }>();
+
+const auth = useAuth();
+
+/** «سلام Mojtaba عزیز» when a name can be derived, otherwise a generic hello. */
+const greeting = computed(() => {
+  const name = displayNameFromEmail(auth.state.user?.email);
+  return name ? `سلام ${name} عزیز` : 'سلام، آماده‌ای؟';
+});
 
 const suggestions: Suggestion[] = [
   {
@@ -35,9 +46,15 @@ const suggestions: Suggestion[] = [
 
 <template>
   <div class="empty-chat">
-    <BrandMark :size="52" class="empty-chat__mark" />
-    <h2 class="empty-chat__title">سلام، آماده‌ای؟</h2>
-    <p class="empty-chat__subtitle">
+    <BrandMark :size="46" class="empty-chat__mark" />
+    <h2 class="empty-chat__title">
+      {{ greeting }}
+      <svg class="empty-chat__spark" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M12 2c.6 4.5 4.5 8.4 9 9-4.5.6-8.4 4.5-9 9-.6-4.5-4.5-8.4-9-9 4.5-.6 8.4-4.5 9-9Z" />
+      </svg>
+    </h2>
+    <p class="empty-chat__subtitle">امروز چه کاری می‌تونم برات انجام بدم؟</p>
+    <p class="empty-chat__hint">
       سؤال بپرس، ایده بساز، بنویس یا تحلیل کن — پاسخ‌ها را زنده و در لحظه دریافت می‌کنی.
     </p>
 
@@ -67,7 +84,7 @@ const suggestions: Suggestion[] = [
 .empty-chat {
   max-width: 34rem;
   margin-inline: auto;
-  padding: 3.5rem 1.5rem 2rem;
+  padding: 4rem 1.5rem 2rem;
   display: grid;
   justify-items: center;
   text-align: center;
@@ -75,20 +92,34 @@ const suggestions: Suggestion[] = [
 }
 
 .empty-chat__mark {
-  margin-bottom: 0.8rem;
-  filter: drop-shadow(0 6px 18px color-mix(in srgb, var(--accent) 35%, transparent));
+  margin-bottom: 1rem;
+  filter: drop-shadow(0 8px 24px color-mix(in srgb, var(--accent) 45%, transparent));
 }
 
 .empty-chat__title {
-  font-size: 1.7rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 1.9rem;
   font-weight: 700;
 }
 
+.empty-chat__spark {
+  color: var(--accent-text);
+  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--accent) 55%, transparent));
+}
+
 .empty-chat__subtitle {
-  max-width: 40ch;
-  font-size: 0.9rem;
+  font-size: 1rem;
+  color: var(--text-1);
+  font-weight: 500;
+}
+
+.empty-chat__hint {
+  max-width: 42ch;
+  font-size: 0.85rem;
   color: var(--text-2);
-  margin-bottom: 1.8rem;
+  margin-bottom: 2rem;
 }
 
 .empty-chat__suggestions {
@@ -115,7 +146,7 @@ const suggestions: Suggestion[] = [
 
 .empty-chat__card:hover {
   border-color: var(--accent-soft-border);
-  box-shadow: var(--shadow-2);
+  box-shadow: var(--shadow-glow);
   translate: 0 -1px;
 }
 
@@ -128,6 +159,15 @@ const suggestions: Suggestion[] = [
   border-radius: var(--radius-sm);
   background: var(--accent-soft);
   color: var(--text-on-accent-soft);
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+/* On hover the tile lights up with the brand gradient. */
+.empty-chat__card:hover .empty-chat__card-icon {
+  background: var(--gradient-primary);
+  color: var(--on-accent);
 }
 
 .empty-chat__card-title {
@@ -144,7 +184,11 @@ const suggestions: Suggestion[] = [
 
 @media (max-width: 640px) {
   .empty-chat {
-    padding-top: 2.2rem;
+    padding-top: 2.4rem;
+  }
+
+  .empty-chat__title {
+    font-size: 1.5rem;
   }
 
   .empty-chat__suggestions {

@@ -6,6 +6,7 @@ import EmptyChat from '../components/chat/EmptyChat.vue';
 import MessageItem from '../components/chat/MessageItem.vue';
 import MessageComposer from '../components/chat/MessageComposer.vue';
 import AppSkeleton from '../components/ui/AppSkeleton.vue';
+import AmbientGlow from '../components/ui/AmbientGlow.vue';
 import { api, streamChatMessage, reconnectGenerationStream, type StreamHandle } from '../api/client';
 import type { AiModel, Conversation, Message } from '../api/types';
 import { useToast } from '../composables/useToast';
@@ -473,6 +474,7 @@ async function scrollToBottom(force = false) {
     />
 
     <main class="chat">
+      <AmbientGlow />
       <ChatHeader
         :title="activeConversation?.title ?? 'گفتگوی تازه'"
         :models="models"
@@ -539,7 +541,7 @@ async function scrollToBottom(force = false) {
   position: fixed;
   inset: 0;
   z-index: var(--z-drawer-overlay);
-  background: color-mix(in srgb, var(--text-1) 30%, transparent);
+  background: var(--overlay);
 }
 
 .chat {
@@ -548,6 +550,18 @@ async function scrollToBottom(force = false) {
   display: flex;
   flex-direction: column;
   background: var(--bg);
+}
+
+/* Ambient aurora sits behind everything; all direct children float above it. */
+.chat > * {
+  position: relative;
+  z-index: 1;
+}
+
+.chat > .ambient-glow {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
 }
 
 .chat__messages {

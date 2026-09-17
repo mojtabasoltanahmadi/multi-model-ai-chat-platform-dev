@@ -36,56 +36,73 @@ are theme-independent.
 
 | Token | Light | Dark |
 |---|---|---|
-| `--accent` | `#4f46e5` | `#5b54ec` |
-| `--accent-hover` | `#4338ca` | `#6d66f0` |
-| `--accent-active` | `#3730a3` | `#4f46e5` |
-| `--accent-text` (links/labels) | `#4f46e5` | `#918bf5` |
-| `--accent-soft` (tinted surface) | `#eceafd` | `#26244d` |
-| `--accent-soft-border` | `#d8d4fa` | `#3b3768` |
+| `--accent` | `#4f46e5` | `#6c66f2` |
+| `--accent-hover` | `#4338ca` | `#817cf6` |
+| `--accent-active` | `#3730a3` | `#5b54ec` |
+| `--accent-text` (links/labels) | `#4f46e5` | `#a6affb` |
+| `--accent-soft` (tinted surface) | `#eceafd` | `#1b2250` |
+| `--accent-soft-border` | `#d8d4fa` | `#323b7c` |
 | `--on-accent` | `#ffffff` | `#ffffff` |
 
 ### Background & Surfaces
 
 | Token | Light | Dark |
 |---|---|---|
-| `--bg` (app background) | `#f7f7f4` warm off-white | `#101216` cool near-black |
-| `--surface` (panels, cards) | `#ffffff` | `#17191f` |
-| `--surface-2` (hover) | `#f1f0ec` | `#1e2128` |
-| `--surface-3` (strong hover/pressed) | `#e9e8e3` | `#262a32` |
-| `--surface-inset` (code, wells) | `#f4f3f0` | `#14161b` |
+| `--bg` (app background) | `#f7f7f4` warm off-white | `#060b1d` midnight navy |
+| `--surface` (panels, cards) | `#ffffff` | `#0b142b` navy panel |
+| `--surface-2` (hover) | `#f1f0ec` | `#101b39` |
+| `--surface-3` (strong hover/pressed) | `#e9e8e3` | `#16234a` |
+| `--surface-inset` (code, wells) | `#f4f3f0` | `#081020` |
 
 ### Text
 
 | Token | Light | Dark |
 |---|---|---|
-| `--text-1` | `#1a1d23` | `#ececf1` |
-| `--text-2` | `#5c6370` | `#9ba1ad` |
-| `--text-3` | `#878e9b` | `#71778a` |
-| `--text-disabled` | `#b3b8c2` | `#4d5261` |
-| `--text-on-accent-soft` | `#3d37a8` | `#b6b2f8` |
+| `--text-1` | `#1a1d23` | `#e9edfc` |
+| `--text-2` | `#5c6370` | `#9aa6cc` |
+| `--text-3` | `#878e9b` | `#67739d` |
+| `--text-disabled` | `#b3b8c2` | `#3f4a73` |
+| `--text-on-accent-soft` | `#3d37a8` | `#bcc3fa` |
 
 ### Border
 
 | Token | Light | Dark |
 |---|---|---|
-| `--border` | `#e4e3de` | `#2a2e37` |
-| `--border-subtle` | `#edecE8` | `#21242b` |
-| `--border-strong` | `#cfcec8` | `#3a3f4b` |
+| `--border` | `#e4e3de` | `#1d2a55` |
+| `--border-subtle` | `#edecE8` | `#15203f` |
+| `--border-strong` | `#cfcec8` | `#2b3a6e` |
 
 ### Semantic
 
 | Token | Light | Dark |
 |---|---|---|
-| `--success` / `--success-soft` | `#067a55` / `#e2f5ee` | `#34c48c` / `#142b22` |
-| `--warning` / `--warning-soft` | `#955205` / `#fbf0d9` | `#e0a33e` / `#2e2410` |
-| `--danger` / `--danger-soft` | `#d3232f` / `#fdebec` | `#f0646f` / `#33191d` |
-| `--info` / `--info-soft` | `#0e6d95` / `#e3f2f9` | `#58b6dc` / `#122733` |
+| `--success` / `--success-soft` | `#067a55` / `#e2f5ee` | `#35d49b` / `#0d2b33` |
+| `--warning` / `--warning-soft` | `#955205` / `#fbf0d9` | `#efb053` / `#31290f` |
+| `--danger` / `--danger-soft` | `#d3232f` / `#fdebec` | `#f47185` / `#3a1c2c` |
+| `--info` / `--info-soft` | `#0e6d95` / `#e3f2f9` | `#56b9e8` / `#0f2f49` |
+
+### Expressive System (gradients, glow, ambient light)
+
+| Token | Light | Dark | Purpose |
+|---|---|---|---|
+| `--gradient-primary` | `135deg #4f46e5→#7c3aed` | `135deg #6366f1→#8b5cf6` | primary CTA fill, active nav, send button, switches ON |
+| `--gradient-primary-hover` | brighter step | brighter step | hover (with `filter: brightness`) |
+| `--shadow-glow` / `--shadow-glow-strong` | violet glow | indigo glow | primary buttons, gradient send, ON switches, active nav |
+| `--overlay` | `rgb(24 24 32 / .45)` | `rgb(2 5 15 / .65)` | modal/drawer/veil backdrops |
+| `--surface-glass` | `rgb(255 255 255 / .82)` | `rgb(11 20 43 / .78)` | glassy headers |
+| `--aurora-1..3` | faint indigo/violet/cyan | stronger (≤ .16 α) | `AmbientGlow` background orbs |
+
+**Gradient discipline**: gradients appear only on primary CTAs, active/selected
+states, the brand mark, ON switches, and the send button — never on passive
+surfaces. Gradients don't interpolate: hover reads through `filter: brightness`
+plus a stronger glow shadow.
 
 ### Dark Mode Rule
 
-Dark mode is intentionally designed, not inverted: warm-dark surfaces, the same indigo
-brand hue (fills stay saturated, text-level accent lightens for contrast), and
-theme-specific soft tints. Both themes ship together; never change one without the other.
+Dark mode is intentionally designed, not inverted: **midnight-navy surfaces
+(every step blue-tinted, never neutral grey)**, the indigo brand hue lifted for
+contrast on dark, blue-light borders, and an ambient aurora layer behind the
+shell. Both themes ship together; never change one without the other.
 
 ## 2.2 Structure Tokens
 
@@ -149,14 +166,16 @@ Header height:      3.6rem (chat header, glassy translucent)
 Sidebar width:      var(--sidebar-width) = 288px
 Sidebar collapsed:  var(--sidebar-collapsed-width) = 56px (rail with toggle)
 Chat measure:       var(--chat-measure) = 46rem (message column)
-Admin content max:  62rem
+Admin nav panel:    17.5rem (rounded surface card, inline-start side)
+Admin content max:  78rem
 Page padding:       1.5rem desktop / 0.9rem mobile
 ```
 
 ## Grid
 
-Chat is a three-part workspace: sidebar (navigation) + main chat column. The admin page
-is a single centered column. No permanent right-side context panel in the MVP.
+Chat is a three-part workspace: sidebar (navigation) + main chat column. Admin is an
+app shell: nav panel + main column + a configuration drawer over an overlay when a
+model is selected (no permanent right panel — the drawer keeps the main UI uncramped).
 
 ## Alignment
 
@@ -181,10 +200,11 @@ All in `frontend/src/components/ui/` (theme-independent) plus feature components
 
 ## Buttons — `AppButton.vue`
 
-Variants: `primary` (accent fill) · `secondary` (surface + border) · `ghost` ·
-`danger` (outline red). Sizes `md` (2.5rem) / `sm` (2rem). States: hover, active,
-disabled (0.55 opacity), loading (inline spinner + `aria-busy`, button disabled).
-One primary action per screen; everything else secondary/ghost.
+Variants: `primary` (brand **gradient fill + glow shadow**) · `secondary` (surface +
+border) · `ghost` · `danger` (outline red). Sizes `md` (2.5rem) / `sm` (2rem). States:
+hover (brightness + stronger glow), active, disabled (0.55 opacity), loading (inline
+spinner + `aria-busy`, button disabled). One primary action per screen; everything
+else secondary/ghost.
 
 ## Inputs — `AppInput.vue`
 
@@ -192,15 +212,43 @@ Label (visible, always) + optional `hint`/`error` + password reveal toggle.
 Focus: accent border + 3px `--accent-soft` ring. Error: red border + `role="alert"`
 message under the field. `dir` prop for LTR fields (email, keys, ids).
 
+## Switch — `AppSwitch.vue`
+
+Accessible `role="switch"` toggle (2.4rem track). ON = brand gradient track + glow;
+knob uses logical properties (flips correctly in RTL). A **disabled-ON switch**
+(locked default model) is muted via `filter: saturate/brightness` — never opacity,
+which would make the gradient read as OFF.
+
 ## Avatar — `AppAvatar.vue`
 
-Initial letter on `--accent-soft` circle. Used for users (email initial) and AI models
-(model name initial).
+Initial letter on `--accent-soft` circle. Used for users (email initial).
+
+## ProviderMark — `ProviderMark.vue`
+
+Provider-kind identity tile used in tables, panels and selectors. The MVP ships two
+kinds, each with a fixed gradient (constant across themes, like a logo):
+`mock` → violet + flask glyph · `openai-compatible` → cyan + hexagon-node glyph.
+No fake vendor logos — the backend only knows these two kinds.
+
+## Drawer — `AppDrawer.vue`
+
+Teleported side panel (`side='end'` docks inline-end = left in RTL, like the
+reference detail panel; `'start'` docks the nav edge). Sizes `md` (26rem) / `lg`
+(30rem); full-width on small screens. Esc/overlay-click closes, focus moves in and
+returns on unmount. The hidden `translate` lives only on `enter-from`/`leave-to` —
+the resting panel is un-transformed (a resting hidden translate would slide the
+panel back out when Vue drops the `enter-to` class).
+
+## AmbientGlow — `AmbientGlow.vue`
+
+Static aurora layer behind the chat/admin/auth shells: three blurred radial orbs
+from `--aurora-1..3`. Pure CSS, no animation, `pointer-events: none`, always
+`z-index: 0` with siblings lifted above it.
 
 ## Modal — `AppModal.vue`
 
 Teleported overlay; sizes `sm` (26rem) / `md` (34rem). Esc closes, overlay click closes,
-focus moves into panel and returns on unmount. Used for model form + destructive confirm.
+focus moves into panel and returns on unmount. Used for destructive confirm (model delete).
 
 ## Toast — `useToast.ts` + `ToastHost.vue`
 
@@ -224,19 +272,25 @@ resolves `system` via `prefers-color-scheme`, applied pre-paint by an inline scr
 
 ## BrandMark — `BrandMark.vue`
 
-The spark mark: accent rounded square + white four-point spark + small satellite dot.
-Used in sidebar, chat header (mobile), auth brand panel, empty chat, admin header.
+The spark mark: **gradient** rounded square (accent→violet, `useId`-referenced defs)
++ white four-point spark + small satellite dot. Used in sidebar, chat header (mobile),
+auth brand panel, empty chat, admin nav.
 
 ## Feature components
 
-* `layout/AppSidebar.vue` — brand, new-conversation, search, date-grouped conversation
-  list (امروز/دیروز/۷ روز گذشته/قدیمی‌تر), profile menu (theme, admin link, logout).
-  Drawer under 1024px with overlay; Esc/click-outside closes.
+* `layout/AppSidebar.vue` — brand, gradient new-conversation button, search, date-grouped
+  conversation list (امروز/دیروز/۷ روز گذشته/قدیمی‌تر), profile menu (theme, admin link,
+  logout). Active item: accent-soft fill + soft glow. Drawer under 1024px with overlay;
+  Esc/click-outside closes.
 * `chat/ChatHeader.vue` — conversation title, model selector (compact), mobile menu button.
-* `chat/ModelSelector.vue` — pill trigger + listbox dropdown (mark, name, default badge,
-  provider, check). Opens up (composer) or down (header). Active models only.
-* `chat/EmptyChat.vue` — brand mark, «سلام، آماده‌ای؟», supporting copy, 4 interactive
-  prompt cards that send immediately.
+  Glassy `--surface-glass` + blur over the ambient background.
+* `chat/ModelSelector.vue` — pill trigger + listbox dropdown (ProviderMark tile, name,
+  default badge, provider label, check). Opens up (composer) or down (header). Active
+  models only.
+* `chat/EmptyChat.vue` — gradient brand mark with glow, **personalized greeting**
+  («سلام Ali عزیز» from the email local part, `displayNameFromEmail`) + spark icon,
+  supporting copy, 4 interactive prompt cards (icon tile lights up with the brand
+  gradient on hover) that send immediately.
 * `chat/MessageItem.vue` — user: soft accent block, `dir="auto"`. Assistant: workspace
   content with model avatar/name/time meta, markdown body, streaming caret, copy action.
   Status variants:
@@ -249,17 +303,24 @@ Used in sidebar, chat header (mobile), auth brand panel, empty chat, admin heade
     * `failed` (provider / network failure) — red surface + `errorMessage` (server-side
       detail never leaked) + primary-accent **تلاش مجدد** button.
   Retry is disabled while another send is in flight. No heavy bubbles.
-* `chat/MessageComposer.vue` — rounded composer (radius-xl, focus ring), autosizing
-  textarea (Enter=send, Shift+Enter=newline), disabled attachment button («به‌زودی»),
-  model selector, send/stop, char counter near the 4000 limit, streaming status line.
-* `admin/ModelTable.vue` — dense table ≥768px, stacked cards below. Inactive rows dimmed,
-  default model marked and protected from destructive actions. Free access is a pill
-  toggle (`role="switch"`, info/warning palette) in its own «دسترسی» column.
-* `admin/ModelStatus.vue` — default (spark) + active/inactive badge pair + Free/Premium
-  badge (info `--info` / warning `--warning` soft tints).
-* `admin/ModelForm.vue` — modal form: provider radio cards (mock / OpenAI-compatible),
-  an `isFree` switch (label + explanatory line + knob, `role="switch"`),
-  validation, API key note.
+* `chat/MessageComposer.vue` — **reference-style two-row composer**: autosizing textarea
+  (Enter=send, Shift+Enter=newline) on top; toolbar below with attachment button
+  («به‌زودی»), model selector, char counter near the 4000 limit, and a **gradient
+  circular send button** (stop variant while streaming). Rounded `--radius-xl` box,
+  focus ring + glow, streaming status line beneath.
+* `admin/AdminModelPanel.vue` — the **configuration drawer** (create + edit). Header:
+  ProviderMark + name + model-id + status badge. Sections (accent-rule headings):
+  تنظیمات پایه (name, provider radio cards with tiles, model id, base URL, API key —
+  empty key = keep stored), دسترسی و وضعیت (AppSwitch rows; default model locked with
+  explanatory note + «تنظیم پیش‌فرض» action), اطلاعات فنی (read-only id/date/key/
+  base-URL dl with copy). Footer: لغو + gradient save.
+* `admin/ModelTable.vue` — reference-style model rows: name + mono model-id, real
+  AppSwitch for فعال/غیرفعال (default locked ON), Free/Premium pill, پیش‌فرض spark
+  badge / set-default icon button, ProviderMark + label, date, icon actions (edit →
+  config drawer, delete → confirm modal). Selected row (panel open) gets accent-soft
+  fill + inset accent bar. Dense table ≥768px, stacked cards below with labeled controls.
+* `admin/ModelStatus.vue` — badge pair (active/inactive + Free/Premium) for the mobile
+  cards.
 
 ---
 
@@ -307,12 +368,22 @@ The **last-opened conversation** persists across reloads (`localStorage`
 `hooshyar.active-conversation`, UUID-validated). Foreign / deleted ids are
 silently cleared.
 
-## Admin List
+## Admin List (app shell)
 
-Toolbar (count + primary «افزودن مدل») → table/cards. Loading skeleton; load failure:
-retry ErrorState; destructive actions confirmed in modal; outcome via toast. Switch
-controls (free access) toggle inline via `PATCH` and re-fetch; backend refusals (e.g.
-un-freeing the default model) surface as error toasts.
+**Shell**: fixed nav panel (rounded surface card: brand + «پنل مدیریت» chip, nav items
+with active accent state, user block, ThemeToggle + logout) on the inline-start side;
+main column (title/subtitle + gradient «افزودن مدل» CTA) over the ambient background.
+Under 1024px the nav collapses away and a glassy topbar (brand + back + logout) takes
+over. Nav contains only real destinations (model list, back to chat) — no fake links.
+
+**Toolbar**: search input (name + model-id) + segmented filter pills (همه/فعال/
+غیرفعال/رایگان/پریمیوم) with live counts; empty-filter state offers «پاک کردن فیلترها».
+
+Table/cards → **configuration drawer** for create AND edit (modal form retired);
+destructive delete stays a confirm modal. Loading skeleton; load failure: retry
+ErrorState; outcome via toast. Switch controls toggle inline via `PATCH` and re-fetch;
+backend refusals (e.g. un-freeing the default model) surface as error toasts. Editing
+sends a PATCH only with a non-empty API key (empty field = keep stored key).
 
 ---
 
@@ -480,6 +551,43 @@ Reason:   Excellent Persian readability; Inter keeps emails/ids crisp; both
           self-hosted via @fontsource (no runtime CDN dependency).
 Date:     2026-09-13
 Affected: main.ts, base.css.
+
+Decision: Dark theme becomes the flagship "midnight navy AI control center" palette
+          (#060b1d bg, blue-tinted surface ladder, blue-light borders) + additive
+          expressive tokens (--gradient-primary, --shadow-glow, --overlay,
+          --surface-glass, --aurora-1..3). Light theme unchanged in character.
+Reason:   Reference redesign brief: premium dark-navy AI SaaS with indigo→violet
+          gradient accents and ambient light. Gradient discipline keeps it from
+          becoming neon: gradients only on CTAs/active states/brand/send/switches.
+Date:     2026-09-17
+Affected: tokens.css, index.html theme-color, AppButton, BrandMark, AppSwitch,
+          AmbientGlow (new), all views.
+
+Decision: Admin gets a real app shell (nav panel / mobile topbar) + toolbar
+          (search + filter pills with counts) + configuration DRAWER for create/edit
+          (AppDrawer + AdminModelPanel); ModelForm modal retired; delete stays modal.
+Reason:   Reference screenshot #2 pattern: nav / content / right-side config panel.
+          Drawer hosts full model config (incl. edit, which the modal never did) —
+          no backend changes, same endpoints.
+Date:     2026-09-17
+Affected: AdminModelsView, ModelTable, AdminModelPanel (new), AppDrawer (new),
+          ProviderMark (new), ModelForm (deleted).
+
+Decision: Composer restructured reference-style: textarea on top, toolbar below
+          (attach, model selector, counter, gradient circular send). Empty chat
+          greeting is personalized from the email local part.
+Reason:   Reference screenshot #1 composer anatomy; ChatGPT-style greeting.
+Date:     2026-09-17
+Affected: MessageComposer, EmptyChat, format.ts (displayNameFromEmail).
+
+Decision: AppDrawer's hidden translate lives only on enter-from/leave-to; the
+          resting panel is un-transformed. A disabled-ON AppSwitch is muted with
+          filter (saturate/brightness), not opacity.
+Reason:   Visual-review bugs: Vue drops enter-to after the transition, so a
+          base-class hidden translate slid the open panel back off-screen;
+          opacity dimming made a locked-ON switch read as OFF.
+Date:     2026-09-17
+Affected: AppDrawer, AppSwitch.
 ```
 
 ---
