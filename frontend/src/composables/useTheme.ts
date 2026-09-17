@@ -1,6 +1,6 @@
 import { computed, ref, watchEffect } from 'vue';
 
-export type ThemePreference = 'light' | 'dark' | 'system';
+export type ThemePreference = 'light' | 'dark' | 'midnight' | 'system';
 
 const STORAGE_KEY = 'hooshyar.theme';
 const media = window.matchMedia('(prefers-color-scheme: dark)');
@@ -9,16 +9,22 @@ const preference = ref<ThemePreference>(readStoredPreference());
 
 function readStoredPreference(): ThemePreference {
   const stored = localStorage.getItem(STORAGE_KEY);
-  if (stored === 'light' || stored === 'dark' || stored === 'system') return stored;
+  if (stored === 'light' || stored === 'dark' || stored === 'midnight' || stored === 'system') {
+    return stored;
+  }
   return 'system';
 }
 
-/** The theme actually painted right now (resolves 'system'). */
-const resolved = ref<'light' | 'dark'>('light');
+/** The theme actually painted right now (resolves 'system'; 'midnight' is always explicit). */
+const resolved = ref<'light' | 'dark' | 'midnight'>('light');
 
 watchEffect(() => {
   resolved.value =
-    preference.value === 'system' ? (media.matches ? 'dark' : 'light') : preference.value;
+    preference.value === 'system'
+      ? media.matches
+        ? 'dark'
+        : 'light'
+      : preference.value;
   document.documentElement.dataset.theme = resolved.value;
 });
 
@@ -31,7 +37,7 @@ media.addEventListener('change', () => {
 });
 
 export function useTheme() {
-  const isDark = computed(() => resolved.value === 'dark');
+  const isDark = computed(() => resolved.value !== 'light');
 
   function setPreference(next: ThemePreference): void {
     preference.value = next;
@@ -39,7 +45,7 @@ export function useTheme() {
   }
 
   function toggle(): void {
-    setPreference(resolved.value === 'dark' ? 'light' : 'dark');
+    setPreference(resolved.value === 'light' ? 'dark' : 'light');
   }
 
   return { preference, resolved, isDark, setPreference, toggle };

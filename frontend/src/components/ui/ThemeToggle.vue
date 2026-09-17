@@ -7,6 +7,7 @@ const options: { value: ThemePreference; label: string }[] = [
   { value: 'light', label: 'روشن' },
   { value: 'system', label: 'سیستم' },
   { value: 'dark', label: 'تاریک' },
+  { value: 'midnight', label: 'نیم‌شب' },
 ];
 </script>
 
@@ -41,9 +42,10 @@ const options: { value: ThemePreference; label: string }[] = [
   border: none;
   background: transparent;
   color: var(--text-2);
-  font-size: 0.78rem;
-  padding: 0.28rem 0.7rem;
+  font-size: 0.74rem;
+  padding: 0.28rem 0.52rem;
   border-radius: var(--radius-xs);
+  white-space: nowrap;
   transition:
     background var(--motion-fast) var(--ease-out),
     color var(--motion-fast) var(--ease-out);

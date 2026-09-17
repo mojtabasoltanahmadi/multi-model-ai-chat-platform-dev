@@ -34,75 +34,103 @@ are theme-independent.
 
 ### Brand
 
-| Token | Light | Dark |
-|---|---|---|
-| `--accent` | `#4f46e5` | `#6c66f2` |
-| `--accent-hover` | `#4338ca` | `#817cf6` |
-| `--accent-active` | `#3730a3` | `#5b54ec` |
-| `--accent-text` (links/labels) | `#4f46e5` | `#a6affb` |
-| `--accent-soft` (tinted surface) | `#eceafd` | `#1b2250` |
-| `--accent-soft-border` | `#d8d4fa` | `#323b7c` |
-| `--on-accent` | `#ffffff` | `#ffffff` |
+| Token | Light | Dark (navy) | Midnight (neutral) |
+|---|---|---|---|
+| `--accent` | `#4f46e5` | `#6c66f2` | `#3b82f6` |
+| `--accent-hover` | `#4338ca` | `#817cf6` | `#549af8` |
+| `--accent-active` | `#3730a3` | `#5b54ec` | `#2f6fd8` |
+| `--accent-text` (links/labels) | `#4f46e5` | `#a6affb` | `#8ab4f9` |
+| `--accent-soft` (tinted surface) | `#eceafd` | `#1b2250` | `rgb(59 130 246 / .12)` |
+| `--accent-soft-border` | `#d8d4fa` | `#323b7c` | `rgb(59 130 246 / .18)` |
+| `--on-accent` | `#ffffff` | `#ffffff` | `#ffffff` |
 
 ### Background & Surfaces
 
-| Token | Light | Dark |
-|---|---|---|
-| `--bg` (app background) | `#f7f7f4` warm off-white | `#060b1d` midnight navy |
-| `--surface` (panels, cards) | `#ffffff` | `#0b142b` navy panel |
-| `--surface-2` (hover) | `#f1f0ec` | `#101b39` |
-| `--surface-3` (strong hover/pressed) | `#e9e8e3` | `#16234a` |
-| `--surface-inset` (code, wells) | `#f4f3f0` | `#081020` |
+| Token | Light | Dark (navy) | Midnight (neutral) |
+|---|---|---|---|
+| `--bg` (app background) | `#f7f7f4` warm off-white | `#060b1d` midnight navy | `#0b0d0f` charcoal black |
+| `--surface` (panels, cards) | `#ffffff` | `#0b142b` navy panel | `#111315` |
+| `--surface-2` (hover) | `#f1f0ec` | `#101b39` | `#17191c` |
+| `--surface-3` (strong hover/pressed) | `#e9e8e3` | `#16234a` | `#1c1f22` |
+| `--surface-inset` (code, wells) | `#f4f3f0` | `#081020` | `#0e1012` |
 
 ### Text
 
-| Token | Light | Dark |
-|---|---|---|
-| `--text-1` | `#1a1d23` | `#e9edfc` |
-| `--text-2` | `#5c6370` | `#9aa6cc` |
-| `--text-3` | `#878e9b` | `#67739d` |
-| `--text-disabled` | `#b3b8c2` | `#3f4a73` |
-| `--text-on-accent-soft` | `#3d37a8` | `#bcc3fa` |
+| Token | Light | Dark (navy) | Midnight (neutral) |
+|---|---|---|---|
+| `--text-1` | `#1a1d23` | `#e9edfc` | `#f5f5f5` |
+| `--text-2` | `#5c6370` | `#9aa6cc` | `#b4b7bc` |
+| `--text-3` | `#878e9b` | `#67739d` | `#858990` |
+| `--text-disabled` | `#b3b8c2` | `#3f4a73` | `#5f6368` |
+| `--text-on-accent-soft` | `#3d37a8` | `#bcc3fa` | `#a8c7fa` |
 
 ### Border
 
-| Token | Light | Dark |
-|---|---|---|
-| `--border` | `#e4e3de` | `#1d2a55` |
-| `--border-subtle` | `#edecE8` | `#15203f` |
-| `--border-strong` | `#cfcec8` | `#2b3a6e` |
+| Token | Light | Dark (navy) | Midnight (neutral) |
+|---|---|---|---|
+| `--border` | `#e4e3de` | `#1d2a55` | `rgb(255 255 255 / .08)` |
+| `--border-subtle` | `#edecE8` | `#15203f` | `rgb(255 255 255 / .055)` |
+| `--border-strong` | `#cfcec8` | `#2b3a6e` | `rgb(255 255 255 / .13)` |
 
 ### Semantic
 
-| Token | Light | Dark |
-|---|---|---|
-| `--success` / `--success-soft` | `#067a55` / `#e2f5ee` | `#35d49b` / `#0d2b33` |
-| `--warning` / `--warning-soft` | `#955205` / `#fbf0d9` | `#efb053` / `#31290f` |
-| `--danger` / `--danger-soft` | `#d3232f` / `#fdebec` | `#f47185` / `#3a1c2c` |
-| `--info` / `--info-soft` | `#0e6d95` / `#e3f2f9` | `#56b9e8` / `#0f2f49` |
+| Token | Light | Dark (navy) | Midnight (neutral) |
+|---|---|---|---|
+| `--success` / `--success-soft` | `#067a55` / `#e2f5ee` | `#35d49b` / `#0d2b33` | `#34c98b` / `rgb(16 185 129 / .13)` |
+| `--warning` / `--warning-soft` | `#955205` / `#fbf0d9` | `#efb053` / `#31290f` | `#f0ad3f` / `rgb(245 158 11 / .13)` |
+| `--danger` / `--danger-soft` | `#d3232f` / `#fdebec` | `#f47185` / `#3a1c2c` | `#ef4444` / `rgb(239 68 68 / .13)` |
+| `--info` / `--info-soft` | `#0e6d95` / `#e3f2f9` | `#56b9e8` / `#0f2f49` | `#22d3ee` / `rgb(34 211 238 / .12)` |
 
 ### Expressive System (gradients, glow, ambient light)
 
-| Token | Light | Dark | Purpose |
-|---|---|---|---|
-| `--gradient-primary` | `135deg #4f46e5→#7c3aed` | `135deg #6366f1→#8b5cf6` | primary CTA fill, active nav, send button, switches ON |
-| `--gradient-primary-hover` | brighter step | brighter step | hover (with `filter: brightness`) |
-| `--shadow-glow` / `--shadow-glow-strong` | violet glow | indigo glow | primary buttons, gradient send, ON switches, active nav |
-| `--overlay` | `rgb(24 24 32 / .45)` | `rgb(2 5 15 / .65)` | modal/drawer/veil backdrops |
-| `--surface-glass` | `rgb(255 255 255 / .82)` | `rgb(11 20 43 / .78)` | glassy headers |
-| `--aurora-1..3` | faint indigo/violet/cyan | stronger (≤ .16 α) | `AmbientGlow` background orbs |
+| Token | Light | Dark (navy) | Midnight (neutral) | Purpose |
+|---|---|---|---|---|
+| `--gradient-primary` | `135deg #4f46e5→#7c3aed` | `135deg #6366f1→#8b5cf6` | `135deg #3b82f6→#8b5cf6` | primary CTA fill, active nav, send button, switches ON |
+| `--gradient-primary-hover` | brighter step | brighter step | brighter step | hover (with `filter: brightness`) |
+| `--shadow-glow` / `--shadow-glow-strong` | violet glow | indigo glow | blue glow (α ≤ .24) | primary buttons, gradient send, ON switches, active nav |
+| `--overlay` | `rgb(24 24 32 / .45)` | `rgb(2 5 15 / .65)` | `rgb(0 0 0 / .6)` | modal/drawer/veil backdrops |
+| `--surface-glass` | `rgb(255 255 255 / .82)` | `rgb(11 20 43 / .78)` | `rgb(11 13 15 / .82)` | glassy headers |
+| `--aurora-1..3` | faint indigo/violet/cyan | stronger (≤ .16 α) | whisper (≤ .05 α) | `AmbientGlow` background orbs |
 
 **Gradient discipline**: gradients appear only on primary CTAs, active/selected
 states, the brand mark, ON switches, and the send button — never on passive
 surfaces. Gradients don't interpolate: hover reads through `filter: brightness`
 plus a stronger glow shadow.
 
-### Dark Mode Rule
+### Region Tokens (theme-scoped surface overrides)
 
-Dark mode is intentionally designed, not inverted: **midnight-navy surfaces
-(every step blue-tinted, never neutral grey)**, the indigo brand hue lifted for
-contrast on dark, blue-light borders, and an ambient aurora layer behind the
-shell. Both themes ship together; never change one without the other.
+Regions that intentionally diverge from the nearest surface token are tokenized
+so every theme can tune them without component forks. All themes define them;
+components never hard-code these surfaces.
+
+| Token | Light | Dark (navy) | Midnight (neutral) | Used by |
+|---|---|---|---|---|
+| `--sidebar-bg` | `var(--surface)` | `var(--surface)` | `#0b0d0f` (sinks to bg) | AppSidebar, admin nav panel |
+| `--composer-bg` | `var(--surface)` | `var(--surface)` | `#17191c` (rises one step) | MessageComposer box |
+| `--focus-border` | `var(--accent)` | `var(--accent)` | `rgb(59 130 246 / .5)` (quieter) | composer focus-within, inputs, search fields |
+| `--cursor-glow` | `rgb(79 70 229 / .05)` | `rgb(99 91 255 / .07)` | `rgb(59 130 246 / .045)` | AmbientGlow cursor-reactive orb |
+
+### Theme System
+
+Three first-class themes, scoped by `:root[data-theme='…']`:
+
+* **light** — warm off-white, indigo accent (product default).
+* **dark** — flagship midnight-navy AI palette; every surface blue-tinted.
+* **midnight** — ChatGPT-inspired **neutral** charcoal: ~90% neutral dark UI,
+  ~10% brand accents (blue/violet/cyan). Hairline white-alpha borders, flatter
+  surfaces, quieter aurora and glow. Accent identity stays visible through the
+  blue `--accent`, the blue→violet gradient (CTAs/switches/send only), and the
+  cursor-reactive glow — not through tinted surfaces.
+
+`useTheme` preferences: `light | dark | midnight | system` (persisted in
+`localStorage['hooshyar.theme']`; `system` resolves via `prefers-color-scheme`
+to light/dark). Applied pre-paint by the inline script in `index.html`
+(no FOUC); `<meta name="theme-color">` follows the resolved theme.
+
+**Dark Mode Rule (updated)**: dark (navy) and midnight (neutral) are separate
+dark designs, not variants of one another. Navy = blue-tinted every step;
+Midnight = neutral charcoal with hairline borders. Never blend the two surface
+ladders — pick one per theme and keep it consistent.
 
 ## 2.2 Structure Tokens
 
@@ -241,9 +269,16 @@ panel back out when Vue drops the `enter-to` class).
 
 ## AmbientGlow — `AmbientGlow.vue`
 
-Static aurora layer behind the chat/admin/auth shells: three blurred radial orbs
-from `--aurora-1..3`. Pure CSS, no animation, `pointer-events: none`, always
-`z-index: 0` with siblings lifted above it.
+Ambient background light behind the chat/admin/auth shells, two layers:
+
+* **Static aurora** — three blurred radial orbs from `--aurora-1..3`. Pure CSS,
+  no animation, `pointer-events: none`, always `z-index: 0` with siblings
+  lifted above it.
+* **Cursor-reactive orb** — a 36rem radial glow (`--cursor-glow`, whisper-level
+  alpha) that trails the pointer via `pointermove` + a rAF lerp (0.08 factor),
+  so it drifts like ambient lighting rather than following the cursor.
+  Positioned with `translate3d` + `will-change: transform`. Disabled on coarse
+  pointers (touch) and under `prefers-reduced-motion: reduce`.
 
 ## Modal — `AppModal.vue`
 
@@ -266,9 +301,9 @@ Centered icon + title + description + optional retry action. `ErrorState` has an
 
 ## ThemeToggle — `ThemeToggle.vue`
 
-3-way segmented radio: روشن / سیستم / تاریک. Persists to localStorage (`hooshyar.theme`),
-resolves `system` via `prefers-color-scheme`, applied pre-paint by an inline script in
-`index.html` (no FOUC).
+4-way segmented radio: روشن / سیستم / تاریک / نیم‌شب. Persists to localStorage
+(`hooshyar.theme`), resolves `system` via `prefers-color-scheme`, applied
+pre-paint by an inline script in `index.html` (no FOUC).
 
 ## BrandMark — `BrandMark.vue`
 
@@ -588,6 +623,24 @@ Reason:   Visual-review bugs: Vue drops enter-to after the transition, so a
           opacity dimming made a locked-ON switch read as OFF.
 Date:     2026-09-17
 Affected: AppDrawer, AppSwitch.
+
+Decision: Third theme «Midnight» (نیم‌شب) — ChatGPT-inspired NEUTRAL charcoal
+          (#0b0d0f bg, white-alpha hairline borders, surface ladder
+          #111315/#17191c/#1c1f22, blue #3b82f6 accent) as a separate selectable
+          theme, not a dark-theme variant. Region tokens (--sidebar-bg,
+          --composer-bg, --focus-border, --cursor-glow) let Midnight diverge
+          per-region (sidebar sinks to bg, composer rises a step) without
+          component forks. Cursor-reactive ambient orb added to AmbientGlow
+          (rAF lerp, token-driven alpha, reduced-motion + coarse-pointer
+          guards); dark/light gain the orb via their own --cursor-glow.
+Reason:   Brief asked for a low-noise neutral dark option with ~90% neutral
+          surfaces + ~10% brand accents — visually distinct from the navy
+          flagship (every-surface-blue-tinted). CSS-variable scoping keeps all
+          three themes in one token file with zero component conditionals.
+Date:     2026-09-18
+Affected: tokens.css, useTheme.ts, index.html (pre-paint + theme-color),
+          ThemeToggle (4-way), AmbientGlow, AppSidebar, AdminModelsView,
+          MessageComposer, AppInput (region/focus tokens).
 ```
 
 ---

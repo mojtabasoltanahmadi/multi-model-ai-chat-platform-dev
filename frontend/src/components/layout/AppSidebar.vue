@@ -288,8 +288,8 @@ function onCreate() {
   flex-direction: column;
   height: 100%;
   padding: 1rem 0.9rem;
-  background: var(--surface);
-  border-inline-end: 1px solid var(--border);
+  background: var(--sidebar-bg);
+  border-inline-end: 1px solid var(--border-subtle);
   overflow: hidden;
 }
 
@@ -358,7 +358,7 @@ function onCreate() {
 
 .sidebar__search-input:focus {
   background: var(--surface);
-  border-color: var(--accent);
+  border-color: var(--focus-border);
 }
 
 /* List */
