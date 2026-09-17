@@ -9,6 +9,7 @@ interface Props {
   status: ChatFileStatus;
   /** Validated MIME type; drives the icon and the thumbnail decision. */
   mimeType?: string;
+  /** Shown in the tooltip — the chip itself stays narrow. */
   size?: number;
   /** Safe backend reason, shown for FAILED files. */
   errorMessage?: string | null;
@@ -39,12 +40,16 @@ const kind = computed(() => fileKind({ originalName: props.name, mimeType: props
 /** A thumbnail only makes sense for images we can actually decode in a tag. */
 const showThumbnail = computed(() => kind.value === 'image' && Boolean(props.previewUrl));
 
+/**
+ * Status is carried by an icon alone — the chip stays narrow enough to fit
+ * several files per row. The words live in the tooltip and the accessible name.
+ */
 const statusLabel = computed(() => {
   switch (props.status) {
     case 'UPLOADING':
-      return 'در حال آپلود…';
+      return 'در حال آپلود';
     case 'PROCESSING':
-      return 'در حال پردازش…';
+      return 'در حال پردازش';
     case 'READY':
       return 'آماده';
     case 'FAILED':
@@ -56,10 +61,16 @@ const statusLabel = computed(() => {
 
 const statusModifier = computed(() => `file-chip--${props.status.toLowerCase()}`);
 
-/** Failures explain themselves; the raw backend reason is already user-safe. */
-const title = computed(() =>
-  props.status === 'FAILED' && props.errorMessage ? props.errorMessage : statusLabel.value,
-);
+/**
+ * The words live in the tooltip and the accessible name only: the visible chip
+ * is icon + truncated file name, so several files share one row.
+ */
+const title = computed(() => {
+  const size = props.size > 0 ? formatBytes(props.size) : '';
+  const parts = [props.name, size, statusLabel.value].filter(Boolean);
+  if (props.status === 'FAILED' && props.errorMessage) parts.push(props.errorMessage);
+  return parts.join(' — ');
+});
 
 /** Images restored from the server have no local preview yet — fetch on mount. */
 onMounted(() => {
@@ -72,13 +83,13 @@ onMounted(() => {
     class="file-chip"
     :class="[statusModifier, { 'file-chip--media': showThumbnail, 'file-chip--openable': clickable }]"
     role="status"
-    :aria-label="`${name} — ${title}`"
+    :aria-label="title"
   >
     <component
       :is="clickable ? 'button' : 'span'"
       class="file-chip__main"
       :type="clickable ? 'button' : undefined"
-      :title="clickable ? `${name} — مشاهده` : title"
+      :title="title"
       @click="clickable && $emit('open')"
     >
       <img
@@ -91,8 +102,8 @@ onMounted(() => {
       <span v-else class="file-chip__icon">
         <svg
           v-if="kind === 'image'"
-          width="14"
-          height="14"
+          width="11"
+          height="11"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -106,8 +117,8 @@ onMounted(() => {
         </svg>
         <svg
           v-else-if="kind === 'sheet'"
-          width="14"
-          height="14"
+          width="11"
+          height="11"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -120,8 +131,8 @@ onMounted(() => {
         </svg>
         <svg
           v-else
-          width="14"
-          height="14"
+          width="11"
+          height="11"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -135,53 +146,38 @@ onMounted(() => {
         </svg>
       </span>
 
-      <span class="file-chip__text">
-        <span class="file-chip__name">{{ name }}</span>
-        <span class="file-chip__meta">
-          <span v-if="size" class="file-chip__size ltr">{{ formatBytes(size) }}</span>
-          <span class="file-chip__state">
-            <span
-              v-if="status === 'UPLOADING' || status === 'PROCESSING'"
-              class="file-chip__spinner"
-              aria-hidden="true"
-            ></span>
-            <svg
-              v-else-if="status === 'READY'"
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.4"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M20 6 9 17l-5-5" />
-            </svg>
-            <svg
-              v-else
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.2"
-              stroke-linecap="round"
-              aria-hidden="true"
-            >
-              <path d="M18 6 6 18M6 6l12 12" />
-            </svg>
-            <span class="file-chip__label">{{ statusLabel }}</span>
-          </span>
-        </span>
-      </span>
+      <span class="file-chip__name">{{ name }}</span>
 
-      <!-- hover affordance: this chip opens a preview -->
-      <span v-if="clickable" class="file-chip__peek" aria-hidden="true">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
-          <path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z" />
-          <circle cx="12" cy="12" r="2.6" />
+      <!-- status: spinner while working, check when ready, cross on failure -->
+      <span class="file-chip__state" aria-hidden="true">
+        <span
+          v-if="status === 'UPLOADING' || status === 'PROCESSING'"
+          class="file-chip__spinner"
+        ></span>
+        <svg
+          v-else-if="status === 'READY'"
+          width="11"
+          height="11"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.6"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M20 6 9 17l-5-5" />
+        </svg>
+        <svg
+          v-else
+          width="11"
+          height="11"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.4"
+          stroke-linecap="round"
+        >
+          <path d="M18 6 6 18M6 6l12 12" />
         </svg>
       </span>
     </component>
@@ -194,7 +190,7 @@ onMounted(() => {
       :title="`حذف فایل ${name}`"
       @click="$emit('remove')"
     >
-      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+      <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true">
         <path d="M18 6 6 18M6 6l12 12" />
       </svg>
     </button>
@@ -202,24 +198,26 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* Same pill language as the admin status badges. */
+/* Compact pill: several files fit on one row inside the composer. */
 .file-chip {
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
+  gap: 0.18rem;
   max-width: 100%;
-  padding: 0.22rem 0.5rem 0.22rem 0.6rem;
+  /* Never squeeze: chips wrap onto the next row at their natural width, so a
+     narrow panel keeps readable names instead of crushed pills. */
+  flex: 0 0 auto;
+  padding: 0.1rem 0.26rem 0.1rem 0.34rem;
   border-radius: var(--radius-full);
   border: 1px solid var(--border);
   background: var(--surface-2);
   color: var(--text-2);
-  font-size: 0.74rem;
-  line-height: 1.5;
+  font-size: 0.7rem;
+  line-height: 1.45;
 }
 
 .file-chip--media {
-  padding: 0.28rem 0.55rem;
-  border-radius: var(--radius-md);
+  padding-inline-start: 0.18rem;
 }
 
 .file-chip--ready {
@@ -244,8 +242,8 @@ onMounted(() => {
 .file-chip__main {
   display: inline-flex;
   align-items: center;
-  gap: 0.45rem;
-  max-width: 100%;
+  gap: 0.24rem;
+  min-width: 0;
   padding: 0;
   background: transparent;
   border: none;
@@ -261,22 +259,22 @@ onMounted(() => {
 .file-chip__main[type='button']:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-full);
 }
 
 .file-chip__thumb {
-  width: 2.5rem;
-  height: 2.5rem;
+  width: 1.3rem;
+  height: 1.3rem;
   flex-shrink: 0;
   object-fit: cover;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-xs);
   border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
   background: var(--surface);
   transition: scale var(--motion-fast) var(--ease-out);
 }
 
 .file-chip--openable:hover .file-chip__thumb {
-  scale: 1.06;
+  scale: 1.08;
 }
 
 .file-chip__icon {
@@ -285,15 +283,9 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
-.file-chip__text {
-  display: flex;
-  flex-direction: column;
-  gap: 0.05rem;
-  min-width: 0;
-}
-
 .file-chip__name {
-  max-width: 14rem;
+  /* Keep short: four or five chips must share one row inside the composer. */
+  max-width: 4.2rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -301,22 +293,11 @@ onMounted(() => {
   color: inherit;
 }
 
-.file-chip__meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.68rem;
-  opacity: 0.9;
-}
-
 .file-chip__state {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-}
-
-.file-chip__label {
-  white-space: nowrap;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  opacity: 0.9;
 }
 
 .file-chip__spinner {
@@ -328,19 +309,6 @@ onMounted(() => {
   animation: file-chip-spin 0.9s linear infinite;
 }
 
-.file-chip__peek {
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-  opacity: 0;
-  transition: opacity var(--motion-fast) var(--ease-out);
-}
-
-.file-chip--openable:hover .file-chip__peek,
-.file-chip--openable:focus-within .file-chip__peek {
-  opacity: 0.85;
-}
-
 @keyframes file-chip-spin {
   to {
     rotate: 360deg;
@@ -350,15 +318,14 @@ onMounted(() => {
 .file-chip__remove {
   display: grid;
   place-items: center;
-  width: 1.05rem;
-  height: 1.05rem;
-  margin-inline-start: 0.1rem;
+  width: 0.88rem;
+  height: 0.88rem;
   padding: 0;
   border: none;
   border-radius: 50%;
   background: transparent;
   color: inherit;
-  opacity: 0.7;
+  opacity: 0.6;
   transition:
     opacity var(--motion-fast) var(--ease-out),
     background var(--motion-fast) var(--ease-out);

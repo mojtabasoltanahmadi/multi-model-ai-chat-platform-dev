@@ -150,7 +150,7 @@ defineExpose({ focus: () => textarea.value?.focus() });
           title="افزودن فایل — می‌توانید چند فایل را همزمان انتخاب کنید"
           @click="pickFiles"
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
             <path d="m21.4 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
           </svg>
         </button>
@@ -196,17 +196,13 @@ defineExpose({ focus: () => textarea.value?.focus() });
             :title="uploading ? 'تا پایان آپلود امکان ارسال نیست' : 'ارسال پیام'"
             @click="send"
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M12 19V5m-7 7 7-7 7 7" />
             </svg>
           </button>
         </div>
       </div>
 
-      <p v-if="uploading" class="composer__busy">
-        <span class="composer__busy-dot" aria-hidden="true"></span>
-        در حال آپلود فایل… تا پایان آپلود امکان ارسال نیست.
-      </p>
     </div>
 
     <div class="composer__under">
@@ -263,10 +259,10 @@ defineExpose({ focus: () => textarea.value?.focus() });
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0.1rem 0.15rem 0.45rem;
+  gap: 0.3rem;
+  padding: 0.05rem 0.1rem 0.4rem;
   border-bottom: 1px solid var(--border-subtle);
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.3rem;
 }
 
 .composer__row {
@@ -276,24 +272,6 @@ defineExpose({ focus: () => textarea.value?.focus() });
   min-width: 0;
 }
 
-.composer__busy {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  margin: 0.4rem 0 0;
-  padding-inline-start: 0.35rem;
-  font-size: 0.7rem;
-  color: var(--text-3);
-}
-
-.composer__busy-dot {
-  width: 0.4rem;
-  height: 0.4rem;
-  border-radius: 50%;
-  background: var(--info);
-  animation: status-pulse 1.1s var(--ease-in-out) infinite;
-}
-
 .composer__file-input {
   display: none;
 }
@@ -301,8 +279,8 @@ defineExpose({ focus: () => textarea.value?.focus() });
 .composer__attach {
   display: grid;
   place-items: center;
-  width: 2.3rem;
-  height: 2.3rem;
+  width: 2.15rem;
+  height: 2.15rem;
   flex-shrink: 0;
   background: transparent;
   border: none;
@@ -328,9 +306,9 @@ defineExpose({ focus: () => textarea.value?.focus() });
   /* A textarea's intrinsic width (default cols) otherwise forces the whole
      composer box past narrow viewports. */
   min-width: 0;
-  min-height: 2.3rem;
+  min-height: 2.15rem;
   max-height: 11rem;
-  padding: 0.4rem 0.2rem;
+  padding: 0.35rem 0.2rem;
   background: transparent;
   border: none;
   outline: none;
@@ -349,8 +327,8 @@ defineExpose({ focus: () => textarea.value?.focus() });
 .composer__send {
   display: grid;
   place-items: center;
-  width: 2.3rem;
-  height: 2.3rem;
+  width: 2.15rem;
+  height: 2.15rem;
   background: var(--accent);
   border: none;
   border-radius: var(--radius-full);
@@ -434,7 +412,6 @@ defineExpose({ focus: () => textarea.value?.focus() });
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .composer__busy-dot,
   .composer__status-dot {
     animation: none;
   }
