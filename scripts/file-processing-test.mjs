@@ -733,6 +733,31 @@ async function main() {
   const anonymousContent = await fetchRaw(null, `/files/${pdfFileId}/content`);
   check('anonymous access to file bytes is rejected (401)', anonymousContent.status === 401, String(anonymousContent.status));
 
+  // ---- non-ASCII names ----
+  // Multipart filenames arrive as latin1-decoded bytes, so a Persian name has
+  // to survive upload → storage → download unchanged (no mojibake shipped to
+  // the user's screen, storage key or Content-Disposition header).
+  const persianName = 'گزارش-فروش-۱۴۰۵.pdf';
+  const persianUpload = await upload(tokenA, conversationId, {
+    buffer: pdfBuffer(),
+    name: persianName,
+    type: 'application/pdf',
+  });
+  check(
+    'a Persian file name is stored unmangled',
+    persianUpload.json?.originalName === persianName,
+    String(persianUpload.json?.originalName),
+  );
+
+  const persianContent = await fetchRaw(tokenA, `/files/${persianUpload.json.id}/content?download=1`);
+  const persianDisposition = persianContent.headers.get('content-disposition') ?? '';
+  check(
+    'the downloaded file keeps the Persian name',
+    persianDisposition.includes("filename*=UTF-8") &&
+      persianDisposition.includes(encodeURIComponent(persianName)),
+    persianDisposition,
+  );
+
   const nonAdminAdmin = await api('GET', '/admin/files', { token: tokenA });
   check('normal user cannot read the admin file view (403)', nonAdminAdmin.status === 403, String(nonAdminAdmin.status));
 
