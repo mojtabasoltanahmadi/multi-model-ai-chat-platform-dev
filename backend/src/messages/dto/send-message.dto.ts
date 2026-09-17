@@ -1,3 +1,4 @@
+import { DEFAULT_MAX_FILES_PER_MESSAGE } from '../../config/configuration';
 import {
   ArrayMaxSize,
   IsArray,
@@ -51,7 +52,9 @@ export class SendMessageDto {
    */
   @IsOptional()
   @IsArray({ message: 'فایل‌های پیوست باید فهرستی از شناسه‌ها باشند.' })
-  @ArrayMaxSize(5, { message: 'حداکثر ۵ فایل می‌تواند در هر پیام پیوست شود.' })
+  @ArrayMaxSize(DEFAULT_MAX_FILES_PER_MESSAGE, {
+    message: `حداکثر ${DEFAULT_MAX_FILES_PER_MESSAGE} فایل می‌تواند در هر پیام پیوست شود.`,
+  })
   @IsUUID('4', { each: true, message: 'شناسه فایل نامعتبر است.' })
   fileIds?: string[];
 }

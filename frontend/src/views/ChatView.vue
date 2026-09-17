@@ -10,6 +10,7 @@ import AppSkeleton from '../components/ui/AppSkeleton.vue';
 import {
   api,
   describeLocalFileProblem,
+  MAX_FILES_PER_MESSAGE,
   fetchChatFile,
   fetchConversationFiles,
   fetchFileContent,
@@ -312,6 +313,20 @@ async function attachFiles(files: File[]) {
     else valid.push(file);
   }
   if (valid.length === 0) return;
+
+  // Per-message cap, enforced before anything leaves the browser (the backend
+  // rejects an oversized fileIds array anyway, so failing early is clearer).
+  const remaining = MAX_FILES_PER_MESSAGE - attachments.value.length;
+  if (remaining <= 0) {
+    toast.error(`حداکثر ${MAX_FILES_PER_MESSAGE.toLocaleString('fa-IR')} فایل می‌توانید اضافه کنید.`);
+    return;
+  }
+  if (valid.length > remaining) {
+    toast.error(
+      `فقط ${remaining.toLocaleString('fa-IR')} فایل دیگر می‌توانید اضافه کنید.`,
+    );
+    valid.length = remaining;
+  }
 
   try {
     if (!activeId.value) await createConversation();

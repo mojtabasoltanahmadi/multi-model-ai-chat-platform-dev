@@ -14,6 +14,7 @@ import { File, FileStatus } from './file.entity';
 import { FILE_JOB_QUEUE, FileJobQueue } from './file-queue.port';
 import { FileStorageService } from './file-storage.service';
 import { FileKind, sanitizeOriginalName, validateUploadedFile } from './file-validation';
+import { DEFAULT_MAX_FILES_PER_MESSAGE } from '../config/configuration';
 
 /**
  * Shape returned by every file API. Neither the extracted text (potentially
@@ -198,7 +199,7 @@ export class FilesService {
   ): Promise<AttachedFileContext[]> {
     if (fileIds.length === 0) return [];
     const maxFilesPerMessage =
-      this.configService.get<number>('files.maxFilesPerMessage') ?? 5;
+      this.configService.get<number>('files.maxFilesPerMessage') ?? DEFAULT_MAX_FILES_PER_MESSAGE;
     if (fileIds.length > maxFilesPerMessage) {
       throw new BadRequestException(
         `حداکثر ${maxFilesPerMessage} فایل می‌تواند در هر پیام پیوست شود.`,

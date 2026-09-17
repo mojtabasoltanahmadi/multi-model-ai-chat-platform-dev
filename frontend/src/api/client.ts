@@ -85,6 +85,9 @@ export async function api<T>(
 /** Mirrors the backend default; the server remains the source of truth. */
 export const MAX_FILE_SIZE_MB = 10;
 
+/** Mirrors the backend's per-message file cap (`FILE_MAX_PER_MESSAGE`). */
+export const MAX_FILES_PER_MESSAGE = 6;
+
 /** Extensions the backend accepts (content is still validated server-side). */
 export const ACCEPTED_FILE_TYPES =
   '.pdf,.xls,.xlsx,.png,.jpg,.jpeg,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/png,image/jpeg';

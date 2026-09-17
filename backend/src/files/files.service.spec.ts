@@ -108,7 +108,7 @@ function setup({
     get: (key: string) =>
       ({
         'files.maxFileSizeBytes': 10 * 1024 * 1024,
-        'files.maxFilesPerMessage': 5,
+        'files.maxFilesPerMessage': 6,
       })[key],
   } as unknown as ConfigService;
 
@@ -294,8 +294,8 @@ describe('FilesService — chat context (READY only)', () => {
     const { service } = setup();
 
     await expect(
-      service.getReadyContext('conv-1', ['a', 'b', 'c', 'd', 'e', 'f']),
-    ).rejects.toThrow(/حداکثر 5 فایل/);
+      service.getReadyContext('conv-1', ['a', 'b', 'c', 'd', 'e', 'f', 'g']),
+    ).rejects.toThrow(/حداکثر 6 فایل/);
   });
 
   it('returns nothing when no file is attached', async () => {

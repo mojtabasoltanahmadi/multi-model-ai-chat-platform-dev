@@ -1,6 +1,12 @@
 /** Shared default so the multer interceptor and the service agree on the cap. */
 export const DEFAULT_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 
+/**
+ * Files attachable to one message. Shared by the DTO (boundary validation) and
+ * the service (the single gate for AI context) so the two can never disagree.
+ */
+export const DEFAULT_MAX_FILES_PER_MESSAGE = 6;
+
 export default () => ({
   port: parseInt(process.env.PORT ?? '4000', 10),
   database: {
@@ -34,7 +40,10 @@ export default () => ({
     // Extracted text sent to the AI per message, across all attached files.
     maxContextChars: parseInt(process.env.FILE_MAX_CONTEXT_CHARS ?? '24000', 10),
     // Per-message attachment cap keeps the prompt and the UI sane for the MVP.
-    maxFilesPerMessage: parseInt(process.env.FILE_MAX_PER_MESSAGE ?? '5', 10),
+    maxFilesPerMessage: parseInt(
+      process.env.FILE_MAX_PER_MESSAGE ?? String(DEFAULT_MAX_FILES_PER_MESSAGE),
+      10,
+    ),
   },
   storage: {
     endpoint: process.env.MINIO_ENDPOINT ?? 'localhost',
