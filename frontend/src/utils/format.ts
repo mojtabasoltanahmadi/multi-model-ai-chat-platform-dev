@@ -35,3 +35,18 @@ export function formatDateTime(iso: string): string {
 export function formatFullDate(iso: string): string {
   return new Intl.DateTimeFormat('fa-IR', { dateStyle: 'medium' }).format(new Date(iso));
 }
+
+/**
+ * Friendly first name for the empty-chat greeting, derived from the email
+ * local part («ali9074@…» → «Ali», «sara.m@…» → «Sara»). Returns '' when no
+ * usable name fragment exists, so callers can fall back to a generic greeting.
+ * Persian local parts are returned untouched; Latin ones get a capital.
+ */
+export function displayNameFromEmail(email: string | null | undefined): string {
+  if (!email) return '';
+  const local = email.split('@')[0] ?? '';
+  const firstFragment = local.replace(/[0-9._-]+/g, ' ').trim().split(/\s+/)[0] ?? '';
+  if (firstFragment.length < 2) return '';
+  const head = Array.from(firstFragment)[0]!;
+  return /[A-Za-z]/.test(head) ? head.toUpperCase() + firstFragment.slice(1) : firstFragment;
+}

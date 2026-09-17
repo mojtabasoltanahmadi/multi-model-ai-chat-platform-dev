@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import ProviderMark from '../ui/ProviderMark.vue';
 import type { AiModel } from '../../api/types';
 
 interface Props {
@@ -60,9 +61,7 @@ onBeforeUnmount(() => {
       aria-label="انتخاب مدل هوش مصنوعی"
       @click="open = !open"
     >
-      <span v-if="selected" class="model-selector__mark" aria-hidden="true">
-        {{ Array.from(selected.name.trim())[0] ?? '؟' }}
-      </span>
+      <ProviderMark v-if="selected" :provider="selected.provider" :size="18" />
       <span v-if="selected" class="model-selector__name">{{ selected.name }}</span>
       <svg
         class="model-selector__chevron"
@@ -99,9 +98,7 @@ onBeforeUnmount(() => {
             :aria-selected="model.id === (selected?.id ?? '')"
             @click="choose(model)"
           >
-            <span class="model-selector__option-mark" aria-hidden="true">
-              {{ Array.from(model.name.trim())[0] ?? '؟' }}
-            </span>
+            <ProviderMark :provider="model.provider" :size="26" />
             <span class="model-selector__option-body">
               <span class="model-selector__option-name">
                 {{ model.name }}
@@ -161,18 +158,6 @@ onBeforeUnmount(() => {
 .model-selector__trigger--compact {
   height: 1.9rem;
   font-size: 0.78rem;
-}
-
-.model-selector__mark {
-  display: grid;
-  place-items: center;
-  width: 1.35rem;
-  height: 1.35rem;
-  border-radius: var(--radius-full);
-  background: var(--accent-soft);
-  color: var(--text-on-accent-soft);
-  font-size: 0.72rem;
-  font-weight: 700;
 }
 
 .model-selector__name {
@@ -240,19 +225,6 @@ onBeforeUnmount(() => {
 
 .model-selector__option:hover {
   background: var(--surface-2);
-}
-
-.model-selector__option-mark {
-  display: grid;
-  place-items: center;
-  width: 1.8rem;
-  height: 1.8rem;
-  border-radius: var(--radius-sm);
-  background: var(--accent-soft);
-  color: var(--text-on-accent-soft);
-  font-size: 0.8rem;
-  font-weight: 700;
-  flex-shrink: 0;
 }
 
 .model-selector__option-body {

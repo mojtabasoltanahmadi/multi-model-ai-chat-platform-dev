@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import BrandMark from '../ui/BrandMark.vue';
+import AmbientGlow from '../ui/AmbientGlow.vue';
 
 interface Feature {
   title: string;
@@ -17,6 +18,7 @@ const features: Feature[] = [
   <main class="auth-shell">
     <!-- Brand panel: the secondary area on desktop, compact header on mobile. -->
     <section class="auth-shell__brand" aria-hidden="false">
+      <AmbientGlow />
       <div class="auth-shell__brand-content">
         <div class="auth-shell__logo">
           <BrandMark :size="40" />
@@ -139,6 +141,7 @@ const features: Feature[] = [
   rotate: 12deg;
   mask-image: radial-gradient(closest-side, black, transparent);
   opacity: 0.7;
+  z-index: 1;
 }
 
 /* Form side */

@@ -67,16 +67,20 @@ const isDisabled = computed(() => props.loading);
 }
 
 .app-button--primary {
-  background: var(--accent);
+  background: var(--gradient-primary);
   color: var(--on-accent);
+  box-shadow: var(--shadow-glow);
 }
 
+/* Gradients don't interpolate; hover reads through brightness + glow lift. */
 .app-button--primary:hover:not(:disabled) {
-  background: var(--accent-hover);
+  filter: brightness(1.08);
+  box-shadow: var(--shadow-glow-strong);
 }
 
 .app-button--primary:active:not(:disabled) {
-  background: var(--accent-active);
+  filter: brightness(0.96);
+  box-shadow: var(--shadow-glow);
 }
 
 .app-button--secondary {

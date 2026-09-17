@@ -75,7 +75,7 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   padding: 1.5rem;
-  background: color-mix(in srgb, var(--text-1) 32%, transparent);
+  background: var(--overlay);
   backdrop-filter: blur(2px);
 }
 

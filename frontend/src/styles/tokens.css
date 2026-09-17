@@ -1,6 +1,10 @@
 /**
  * Design tokens — single source of truth (mirrors DESIGN_SYSTEM.md).
  * Light theme is default; dark theme overrides semantic tokens only.
+ *
+ * Additive system tokens (gradient / glow / overlay / aurora) drive the
+ * "premium AI control center" visual language: gradients live only on
+ * primary CTAs, active states and brand marks — never on every surface.
  */
 
 :root {
@@ -51,6 +55,17 @@
   --shadow-3: 0 8px 24px rgb(26 29 35 / 0.12), 0 2px 6px rgb(26 29 35 / 0.06);
   --shadow-overlay: 0 16px 48px rgb(26 29 35 / 0.18);
 
+  /* ---- Expressive system (gradient CTA / glow / veil / ambient light) ---- */
+  --gradient-primary: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+  --gradient-primary-hover: linear-gradient(135deg, #4338ca 0%, #6d28d9 100%);
+  --shadow-glow: 0 4px 16px rgb(124 58 237 / 0.28);
+  --shadow-glow-strong: 0 6px 24px rgb(124 58 237 / 0.38);
+  --overlay: rgb(24 24 32 / 0.45);
+  --surface-glass: rgb(255 255 255 / 0.82);
+  --aurora-1: rgb(79 70 229 / 0.08);
+  --aurora-2: rgb(124 58 237 / 0.05);
+  --aurora-3: rgb(14 165 233 / 0.04);
+
   /* ---- Layout ---- */
   --sidebar-width: 288px;
   --sidebar-collapsed-width: 3.5rem;
@@ -83,42 +98,55 @@
 :root[data-theme='dark'] {
   color-scheme: dark;
 
-  --accent: #5b54ec;
-  --accent-hover: #6d66f0;
-  --accent-active: #4f46e5;
-  --accent-text: #918bf5;
-  --accent-soft: #26244d;
-  --accent-soft-border: #3b3768;
+  /* Indigo stays the brand hue; values lift for contrast on navy. */
+  --accent: #6c66f2;
+  --accent-hover: #817cf6;
+  --accent-active: #5b54ec;
+  --accent-text: #a6affb;
+  --accent-soft: #1b2250;
+  --accent-soft-border: #323b7c;
   --on-accent: #ffffff;
 
-  --bg: #101216;
-  --surface: #17191f;
-  --surface-2: #1e2128;
-  --surface-3: #262a32;
-  --surface-inset: #14161b;
+  /* Midnight-navy surfaces: every step is blue-tinted, never neutral grey. */
+  --bg: #060b1d;
+  --surface: #0b142b;
+  --surface-2: #101b39;
+  --surface-3: #16234a;
+  --surface-inset: #081020;
 
-  --text-1: #ececf1;
-  --text-2: #9ba1ad;
-  --text-3: #71778a;
-  --text-disabled: #4d5261;
-  --text-on-accent-soft: #b6b2f8;
+  --text-1: #e9edfc;
+  --text-2: #9aa6cc;
+  --text-3: #67739d;
+  --text-disabled: #3f4a73;
+  --text-on-accent-soft: #bcc3fa;
 
-  --border: #2a2e37;
-  --border-subtle: #21242b;
-  --border-strong: #3a3f4b;
+  /* Borders read as faint blue light lines on the navy shell. */
+  --border: #1d2a55;
+  --border-subtle: #15203f;
+  --border-strong: #2b3a6e;
 
-  --success: #34c48c;
-  --success-soft: #142b22;
-  --warning: #e0a33e;
-  --warning-soft: #2e2410;
-  --danger: #f0646f;
-  --danger-hover: #f47f88;
-  --danger-soft: #33191d;
-  --info: #58b6dc;
-  --info-soft: #122733;
+  --success: #35d49b;
+  --success-soft: #0d2b33;
+  --warning: #efb053;
+  --warning-soft: #31290f;
+  --danger: #f47185;
+  --danger-hover: #f78ba0;
+  --danger-soft: #3a1c2c;
+  --info: #56b9e8;
+  --info-soft: #0f2f49;
 
-  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4);
-  --shadow-2: 0 2px 8px rgb(0 0 0 / 0.45), 0 1px 2px rgb(0 0 0 / 0.35);
-  --shadow-3: 0 8px 24px rgb(0 0 0 / 0.5), 0 2px 6px rgb(0 0 0 / 0.4);
-  --shadow-overlay: 0 16px 48px rgb(0 0 0 / 0.6);
+  --shadow-1: 0 1px 2px rgb(1 4 14 / 0.5);
+  --shadow-2: 0 2px 8px rgb(1 4 14 / 0.55), 0 1px 2px rgb(1 4 14 / 0.4);
+  --shadow-3: 0 8px 24px rgb(1 4 14 / 0.6), 0 2px 6px rgb(1 4 14 / 0.45);
+  --shadow-overlay: 0 16px 48px rgb(1 4 14 / 0.7);
+
+  --gradient-primary: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  --gradient-primary-hover: linear-gradient(135deg, #7478f4 0%, #9d74f8 100%);
+  --shadow-glow: 0 4px 18px rgb(99 91 255 / 0.35);
+  --shadow-glow-strong: 0 6px 26px rgb(99 91 255 / 0.45);
+  --overlay: rgb(2 5 15 / 0.65);
+  --surface-glass: rgb(11 20 43 / 0.78);
+  --aurora-1: rgb(79 70 229 / 0.16);
+  --aurora-2: rgb(124 58 237 / 0.12);
+  --aurora-3: rgb(34 211 238 / 0.07);
 }

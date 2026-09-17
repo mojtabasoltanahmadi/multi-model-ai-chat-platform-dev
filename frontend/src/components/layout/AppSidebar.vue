@@ -406,6 +406,7 @@ function onCreate() {
 .sidebar__item--active {
   background: var(--accent-soft);
   border-color: var(--accent-soft-border);
+  box-shadow: 0 2px 14px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .sidebar__item--active:hover {
