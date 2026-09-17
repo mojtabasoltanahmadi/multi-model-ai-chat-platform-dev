@@ -264,14 +264,16 @@ Used in sidebar, chat header (mobile), auth brand panel, empty chat, admin heade
 * `chat/FileChip.vue` — one file, deliberately small (~125 px) so four to five share one row:
   thumbnail (`--radius-xs`, 1.3rem, `object-fit: cover`) for images, otherwise a compact kind
   icon (document / sheet / image, inline SVG, 11px), an ellipsized name capped at 4.2rem, and an
-  **icon-only** status affordance — pulsing spinner while uploading/processing, check when ready,
-  cross on failure. No status *words* are rendered: the tooltip (`name — size — status`, plus the
-  safe failure reason) and the accessible name carry them, which is what lets several chips fit
-  on a line. `flex: 0 0 auto` means chips wrap at their natural width instead of being crushed in
+  **icon-only** status affordance — a clock while queued, a spinner while transferring or
+  processing, a check once uploaded/ready, a cross on failure. No status *words* are rendered:
+  the tooltip (`name — size — status`, plus the safe failure reason) and the accessible name
+  carry them, which is what lets several chips fit on a line. `flex: 0 0 auto` means chips wrap at their natural width instead of being crushed in
   a narrow panel. Tone follows the semantic palette (`--info-soft` while working,
   `--success-soft` when ready, `--danger-soft` on failure) and matches the admin status pills.
   `role="status"`; a `READY` chip becomes a button that opens the viewer; a removable chip
-  carries its own × (aria-label «حذف فایل …») without shifting the layout.
+  carries its own × (aria-label «حذف فایل …») without shifting the layout; a chip whose upload
+  failed adds a small retry glyph (aria-label «تلاش دوباره برای آپلود …») next to the ×, so the
+  recovery action sits on the file it belongs to instead of somewhere else in the composer.
 * `chat/FileViewerModal.vue` — full-screen preview sheet: overlay at `--z-modal` with a 10px
   `backdrop-filter: blur` so the conversation stays visible but out of focus; panel
   `min(62rem, 100%)`. Header = kind badge + filename + size + a danger-tinted × close;
@@ -579,6 +581,28 @@ Reason:   Ownership is already enforced per request in the backend, MinIO stays 
           file feature follows. The cost (bytes through the backend) is acceptable at MVP scale.
 Date:     2026-09-16
 Affected: files.controller.ts, FileViewerModal.vue, api/client.ts.
+
+Decision: Files upload one at a time, in pick order, and Send waits for the whole batch
+Reason:   A user picking four files wants to see which one is being transferred, which are still
+          waiting and what already landed — a parallel burst of requests only shows four spinners
+          and makes the first "done" ambiguous. A sequential queue gives every chip its own
+          `pending → uploading → completed` story (plus `error` with a retry on that chip), keeps
+          the server's multipart handling gentle, and turns precedence into something the user can
+          watch. Because an uploading file is not in the conversation yet, Send stays locked until
+          every picked file is uploaded — the textarea is never disabled, so the draft keeps
+          being written and survives the whole batch.
+Date:     2026-09-17
+Affected: ChatView.vue, MessageComposer.vue, FileChip.vue, utils/uploadQueue.ts.
+
+Decision: A failed upload halts the queue and is retried from its own chip, never skipped
+Reason:   Continuing past the failure would upload the rest behind the user's back while they are
+          deciding what to do about the file that broke (and changing the file that broke would
+          then land mid-queue). Halting keeps the batch's meaning intact: the chip that failed
+          carries a retry (the picked File is still in memory, so nothing has to be re-selected)
+          and Send stays locked — the error reason is the button's accessible name — until the
+          file is retried successfully or explicitly removed, which resumes the rest.
+Date:     2026-09-17
+Affected: ChatView.vue, utils/uploadQueue.ts, FileChip.vue.
 
 Decision: Chip status is an icon, never a word, and a message carries at most six chips
 Reason:   Chips sit inside the message box the user is typing in, so every word spent on

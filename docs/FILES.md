@@ -134,14 +134,27 @@ Sending a message with attachments adds `fileIds: string[]` (≤ 6, uuids) to th
 
 ## Frontend UX
 
-- **Multi-select upload.** The composer's 📎 button opens the picker with `multiple`: one
-  gesture can queue several files. Each accepted file becomes a chip immediately (with an
-  image thumbnail drawn from the local `File`), and uploads run concurrently.
-- **Send is blocked while an upload is in flight** — the files are not in the conversation yet,
-  so sending would silently drop them. The user can keep typing, keep adding files, and the
-  button explains itself («تا پایان آپلود امکان ارسال نیست»). Files that are merely *processing*
-  never block chat: the message goes out with the ready ones and the rest stay attached for the
-  next turn.
+- **Multi-select upload, transferred sequentially.** The composer's 📎 button opens the picker
+  with `multiple`: one gesture queues several files, and every accepted file becomes a chip
+  immediately (with an image thumbnail drawn from the local `File`). Uploads run **one at a
+  time, in pick order**, through `utils/uploadQueue.ts`: the first file starts, its chip turns
+  `✓` when the transfer returns, and only then does the next one begin.
+- **Each chip carries its own upload state**: `pending` (clock, muted/dashed — its turn has not
+  come), `uploading` (spinner), `completed` (✓, shown as soon as the POST returns, even while the
+  backend is still extracting) and `error` (✗ + a retry glyph on that chip). The chip's tooltip
+  spells the state out (`name — size — status`), so nothing is guessed from an icon alone.
+- **Send waits for the whole batch** — the files are not in the conversation yet, so sending
+  would silently drop them. It stays disabled while any picked file is `pending`, `uploading` or
+  `error`, *including* when a draft has been typed; a failed upload keeps it locked with the
+  reason as the button's tooltip/`aria-label`, and the chip's own retry (the `File` is still in
+  memory, nothing has to be re-picked) or removal releases the queue. The textarea is never
+  disabled: the draft is written and edited the whole time and survives every state change. Files
+  that are merely *processing* never block chat: the message goes out with the ready ones and the
+  rest stay attached for the next turn.
+- **A failure halts the queue.** Nothing behind the failed file starts until the user retries it
+  (it goes back to the front, preserving order) or removes it — the files behind it are never
+  uploaded behind the user's back. `createUploadQueue` also remembers the ids it already
+  uploaded, so a double retry or a re-picked file can never be transferred twice.
 - **A ready file alone can be sent** — no text required. The backend still requires non-blank
   content, so the UI sends a neutral instruction («این فایل را بررسی کن.») when the draft is
   empty, which keeps history and the auto-generated conversation title meaningful.
@@ -151,8 +164,9 @@ Sending a message with attachments adds `fileIds: string[]` (≤ 6, uuids) to th
   of truth and a rejected file comes back as a clear Persian message.
 - **Compact chips, capacity mirroring the backend.** A chip is icon + ellipsized name + an
   icon-only status affordance + × (~125 px), so five fit on one row at the composer's full
-  `--chat-measure` width and nothing has to be spelled out in words: the spinner, the check and
-  the cross carry the state, and the tooltip holds the words (name — size — status, plus the
+  `--chat-measure` width and nothing has to be spelled out in words: the clock, the spinner, the
+  check and the cross carry the state (the retry glyph appears only on a failed chip), and the
+  tooltip holds the words (name — size — status, plus the
   safe failure reason). The picker accepts at most `MAX_FILES_PER_MESSAGE` (6) chips per message:
   a batch is trimmed to the remaining slots with a Persian toast (and the backend independently
   bounds `fileIds`, so a crafted request cannot exceed the cap).
@@ -357,4 +371,19 @@ operational view.
   reprocess, refresh recovery, chat while a file is still `PROCESSING`, a Persian filename that
   must survive upload and download, and the preview/download contract: owner bytes, inline vs
   attachment disposition, `nosniff`, no storage key in the response, foreign/anonymous denial).
+- `frontend/tests/uploadQueue.test.mjs` — 7 checks for the sequential upload queue: one transfer
+  at a time in pick order, a failure halts the queue and hands the file back, retry resumes from
+  the front and then continues, dropping the failed file lets the rest run, dropping a file that is
+  still waiting never starts it, removing the file being uploaded keeps the queue moving, no id is
+  ever uploaded twice, and `reset` forgets queued items while the in-flight transfer settles. There is no
+  frontend test runner, so it loads the TypeScript module through Node's type stripping:
+  `node --experimental-strip-types frontend/tests/uploadQueue.test.mjs`.
+- Browser-verified, against the live stack in the preview (not by reading code): a three-file batch
+  walked `pending, pending, pending` → `✓, uploading, pending` → `✓, ✓, uploading` → all `✓`, with
+  the captured request intervals proving no two transfers overlapped and the order matching the
+  picks; Send stayed disabled in every non-terminal state while a draft typed mid-upload kept its
+  text; a forced 500 on the second file left it `✗` (retry glyph, safe reason in the tooltip) with
+  the third still `pending` and no request issued for it, and the retry sent that file first, the
+  third only after it succeeded; a single file behaved like a one-item batch; before/after the
+  reload no chip or its status was lost, and the console stayed free of Vue warnings.
 - `scripts/smoke-test.mjs` — the Day 1–4 regression suite, 75/75 green after this feature.

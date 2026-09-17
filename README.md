@@ -65,11 +65,13 @@ The Vite dev server proxies `/api` to `http://localhost:4000`, so no CORS setup 
 3. The first active model automatically becomes the default.
 4. Register a normal user, create a conversation, and chat — responses stream in live.
 5. Add files with the 📎 button — it accepts several at once (at most six per message), and they
-   appear as compact chips inside the input box: a spinner while uploading/processing, a check
-   when ready, a cross on failure, and a thumbnail for images. The tooltip carries the words
-   (name, size, status). You can send with a file alone (no text). Send unlocks as soon as every
-   picked file has finished uploading — you keep typing meanwhile, and chat stays fully usable
-   while a file is processing.
+   appear as compact chips inside the input box: a clock while queued, a spinner while
+   uploading/processing, a check once uploaded, a cross on failure (with a retry on the chip
+   itself), and a thumbnail for images. The tooltip carries the words (name, size, status). The
+   batch is **uploaded one file at a time, in the order you picked them**, and you can send with a
+   file alone (no text). Send unlocks only after every picked file has finished uploading — even
+   with a draft written — while you keep typing the whole time and chat stays fully usable while a
+   file is processing. If one file fails, nothing behind it starts until you retry or remove it.
 6. Click a ready chip — on a sent message too — to open it: the image or PDF appears over a
    blurred backdrop with a download button and a close × (Esc works).
 
@@ -82,6 +84,9 @@ npx jest                             # 174 unit tests (no database or services n
 # with the backend + postgres + redis + minio running:
 node ../scripts/smoke-test.mjs       # 75 end-to-end HTTP checks (Day 1-4 regression)
 node ../scripts/file-processing-test.mjs   # 53 file upload/processing/preview checks (Day 5-6)
+
+cd frontend
+node --experimental-strip-types tests/uploadQueue.test.mjs   # 7 composer upload-queue checks
 ```
 
 ## Documentation

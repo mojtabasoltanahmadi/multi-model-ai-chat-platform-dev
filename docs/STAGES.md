@@ -590,3 +590,46 @@ while typing stays possible.
   with «حداکثر ۶ فایل…», a file-only send that produced its message with chips, an image chip with
   a live thumbnail, and a viewer opening with `backdrop-filter: blur(10px)` plus a working
   download. Persian names round-tripped correctly once the fix was live.
+
+## Stage 17 — Sequential uploads with per-file state and retry
+
+Third pass on the same composer flow, this time on the *transfer* itself: a multi-file pick had to
+become a sequence the user can read (one file uploading at a time, in pick order, each getting its
+own ✓ the moment it lands) instead of a parallel burst the UI could not narrate — and a failure
+had to stop the batch rather than silently continue the rest.
+
+**Changes**
+- New `frontend/src/utils/uploadQueue.ts`: a framework-free sequential queue that owns ordering and
+  the halt-on-failure rule, hands a failed item back to the caller, and remembers the ids it already
+  uploaded so nothing is ever transferred twice. Its behaviour is covered by
+  `frontend/tests/uploadQueue.test.mjs` (7 checks), which runs the TypeScript module directly through
+  Node's type stripping since the frontend has no test runner.
+- `api/types.ts` gains `FileUploadState` (`pending | uploading | completed | error`) and
+  `ComposerFile` (the server record plus local upload bookkeeping and the picked `File`, kept so a
+  failed upload can be retried without re-selecting anything). The composer's files are now typed as
+  `ComposerFile[]`, so `upload` and the server `status` stay visibly separate: a chip is `completed`
+  (✓) as soon as the POST returns, even while the backend is still extracting text.
+- `FileChip` renders the four states through one glyph (clock / spinner / check / cross) plus a small
+  retry glyph that appears only on a failed upload, and takes an explicit `upload` prop — history
+  chips keep deriving their state from the server status alone.
+- `MessageComposer` locks Send while any file is `pending`, `uploading` or `error` — a written draft
+  does not unlock it, and the button's tooltip/`aria-label` says why. The textarea is never disabled,
+  so the draft is written and edited throughout and survives every state change.
+- `ChatView` enqueues the picked batch (chips appear immediately, muted and dashed while queued),
+  patches one chip at a time, and only polls the server for chips whose upload already returned.
+
+**Real bug found while verifying in the browser**
+- `refreshAttachments` replaced each chip object with the freshly polled server file, which dropped
+  the local `upload` field and turned a settled `✓` back into an untyped status — the chips now merge
+  the server fields into the existing chip so the upload state survives every poll. (Caught by
+  `vue-tsc` first, confirmed fixed by re-running the batch.)
+
+**Verification**
+- Frontend: `vue-tsc` and the production build are clean; the 7 queue checks pass.
+- Browser (live stack, real preview): a three-file batch walked `pending, pending, pending` →
+  `✓, uploading, pending` → `✓, ✓, uploading` → all `✓`, with captured request intervals proving the
+  transfers never overlapped and matched the pick order; Send was disabled in every non-terminal
+  state while a draft typed mid-upload kept its text; a forced 500 on the second file left it `✗`
+  with a retry and the third `pending` with no request issued, and the retry sent that file first and
+  the third only after it succeeded; a single file behaved like a one-item batch; a reload restored
+  every chip and status, and the console stayed free of Vue warnings.
