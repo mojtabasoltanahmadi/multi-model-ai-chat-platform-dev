@@ -18,6 +18,7 @@ import { ConversationsService } from '../conversations/conversations.service';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { FilesService } from './files.service';
 import { contentDisposition } from './content-disposition';
+import { decodeUploadFilename } from './upload-filename';
 
 /**
  * Types the browser can render inline. Everything else (Excel) is served as a
@@ -63,7 +64,9 @@ export class FilesController {
     return this.filesService.upload(user.id, conversationId, {
       buffer: file.buffer,
       declaredMime: file.mimetype,
-      originalName: file.originalname,
+      // Repaired here, at the boundary: everything downstream (storage key,
+      // database row, Content-Disposition) then works with the real name.
+      originalName: decodeUploadFilename(file.originalname),
     });
   }
 
