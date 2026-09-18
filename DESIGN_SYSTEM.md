@@ -765,6 +765,18 @@ Reason:   Continuing past the failure would upload the rest behind the user's ba
 Date:     2026-09-17
 Affected: ChatView.vue, utils/uploadQueue.ts, FileChip.vue.
 
+Decision: A conversation always opens pinned to its end, and the user is never
+locked to a running generation — switching chats (or starting a new one)
+detaches the tab from the live stream while the answer keeps generating
+server-side; returning re-attaches via the existing recovery path
+Reason:   The initial pin measured the loading skeleton (messages rendered
+after the scroll), so chats opened from the top; and the `streaming` guard
+on navigation held the user hostage to one answer. Detach is honest: abort
+fires no stream callbacks, the DB stays the source of truth, and a deliberate
+Stop still marks its row `interrupted`.
+Date:     2026-09-18
+Affected: ChatView.vue.
+
 Decision: Chip status is an icon, never a word, and a message carries at most six chips
 Reason:   Chips sit inside the message box the user is typing in, so every word spent on
           «آماده» / «در حال آپلود…» costs space the draft needs: the words moved into the tooltip

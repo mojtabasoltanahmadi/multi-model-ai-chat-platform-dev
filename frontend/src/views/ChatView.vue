@@ -169,6 +169,11 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   stopAttachmentPolling();
   releasePreviews();
+  // Leaving the chat (e.g. to an admin page) mid-stream must not leave an
+  // SSE connection hanging: the generation continues server-side and
+  // returning re-attaches via the loadMessages recovery path.
+  streamHandle.value?.abort();
+  streamHandle.value = null;
 });
 
 // Connectivity returned: re-attach any row whose live feed a transport drop
@@ -209,9 +214,15 @@ async function loadModels() {
 
 // ---- conversations ----
 async function selectConversation(id: string) {
-  if (id === activeId.value || streaming.value) return;
+  if (id === activeId.value) return;
+  // The user may move while an answer streams: detach this tab from the
+  // live feed first (the generation keeps running AND persisting
+  // server-side), then load the newly opened conversation — which
+  // re-attaches on its own if IT is still generating.
+  if (streaming.value) detachStream();
   activeId.value = id;
   error.value = '';
+  pinnedToBottom.value = true;
   await loadMessages();
 }
 
@@ -237,36 +248,41 @@ async function loadMessages() {
   // Files are loaded with the conversation so a refresh restores in-flight
   // processing state (it is persisted server-side, never only in memory).
   void loadConversationFiles();
+  // Recovery: an assistant row still pending/streaming means a generation
+  // is (or was) running server-side — re-attach instead of regenerating.
+  // Latest unfinished row only; completed/failed/interrupted rows load as-is.
+  let recoverable: Message | undefined;
   try {
     const result = await api<{ conversation: Conversation; messages: Message[] }>(
       `/conversations/${activeId.value}`,
     );
     messages.value = result.messages;
-    await scrollToBottom(true);
-
-    // Recovery: an assistant row still pending/streaming means a generation
-    // is (or was) running server-side — re-attach instead of regenerating.
-    // Latest unfinished row only; completed/failed/interrupted rows load as-is.
-    const recoverable = [...result.messages]
+    recoverable = [...result.messages]
       .reverse()
       .find(
         (m) =>
           m.role === 'assistant' && (m.status === 'pending' || m.status === 'streaming'),
       );
-    if (recoverable) void recoverGeneration(recoverable);
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'خطا';
   } finally {
     messagesLoading.value = false;
   }
+  // Pin to the end AFTER the skeleton unmounts: scrolling earlier measures
+  // the placeholder height, so the conversation would open from the top.
+  await scrollToBottom(true);
+  if (recoverable) void recoverGeneration(recoverable);
 }
 
 function startNewConversation() {
-  if (streaming.value) return;
+  // Same as switching conversations: never hold the user hostage to a
+  // running generation — detach and let the new chat start immediately.
+  if (streaming.value) detachStream();
   activeId.value = null;
   messages.value = [];
   attachments.value = [];
   viewerFile.value = null;
+  pinnedToBottom.value = true;
   releasePreviews();
   uploadQueue.reset();
 }
@@ -841,6 +857,22 @@ function retry(message: Message) {
   });
 }
 
+/**
+ * Detach this tab from the live transport WITHOUT touching message rows:
+ * aborting never fires stream callbacks (client.ts guards on
+ * `signal.aborted`), the generation keeps running server-side, and the next
+ * load of that conversation reads the truth from the DB — completed rows
+ * render as-is, still-running ones re-attach via `recoverGeneration`.
+ * A deliberate Stop still uses `stopStreaming` (marks `interrupted`).
+ */
+function detachStream() {
+  streamHandle.value?.abort();
+  streamHandle.value = null;
+  streaming.value = false;
+  activeStreamRowId.value = null;
+  inflightClientMessageId.value = null;
+}
+
 function stopStreaming() {
   streamHandle.value?.abort();
   // Aborting only detaches THIS view from the live stream — the generation
@@ -873,6 +905,15 @@ async function scrollToBottom(force = false) {
   await nextTick();
   const element = scroller.value;
   if (element && (force || pinnedToBottom.value)) element.scrollTop = element.scrollHeight;
+}
+
+/**
+ * Thumbnails of historical images load lazily (FileChip requests them after
+ * mount) and grow their rows after the initial pin — re-pin only while the
+ * user is still at the end, never yanking them back up.
+ */
+function onMediaLoad() {
+  void scrollToBottom();
 }
 </script>
 
@@ -911,7 +952,12 @@ async function scrollToBottom(force = false) {
         </div>
       </Transition>
 
-      <div ref="scroller" class="chat__messages" @scroll.passive="onScroll">
+      <div
+        ref="scroller"
+        class="chat__messages"
+        @scroll.passive="onScroll"
+        @load.capture="onMediaLoad"
+      >
         <EmptyChat v-if="!activeId && !conversationsLoading" @pick="send" />
 
         <div v-else-if="messagesLoading" class="chat__loading" aria-label="در حال بارگذاری پیام‌ها">
