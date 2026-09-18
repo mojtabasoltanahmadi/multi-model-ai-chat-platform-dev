@@ -21,6 +21,11 @@ async function bootstrap() {
 
   app.enableCors({ origin: true, credentials: true });
 
+  // Let BullMQ close its Redis connections and finish in-flight jobs on
+  // SIGTERM/SIGINT instead of dropping them mid-processing; orphaned rows are
+  // additionally recovered by the processor's sweeper on the next boot.
+  app.enableShutdownHooks();
+
   const configService = app.get(ConfigService);
   const port = configService.get<number>('port') ?? 4000;
   await app.listen(port);

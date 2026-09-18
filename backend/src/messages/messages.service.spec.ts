@@ -1,6 +1,7 @@
-import { NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { GenerationRegistry } from './generation.registry';
 import { MessagesService, ChatStreamEvent, ChatTurnHandle } from './messages.service';
+import { AttachedFileContext } from '../files/files.service';
 import { createMockRepository } from '../test/mocks';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -16,17 +17,20 @@ describe('MessagesService — chat turn lifecycle', () => {
   };
   let modelsService: { resolveChatModel: jest.Mock };
   let aiProviderService: { streamChat: jest.Mock };
+  let filesService: { getReadyContext: jest.Mock };
 
   const setup = ({
     history = [],
     title = 'گفتگوی جدید',
     persistIntervalMs = 60_000,
     existingUserByClientMid = null,
+    readyFiles = [] as AttachedFileContext[],
   }: {
     history?: { role: 'user' | 'assistant'; content: string }[];
     title?: string;
     persistIntervalMs?: number;
     existingUserByClientMid?: { id: string; content: string } | null;
+    readyFiles?: AttachedFileContext[];
   } = {}) => {
     conversationsService = {
       getOwned: jest.fn().mockResolvedValue({ id: 'conv-1', userId: 'user-1', title }),
@@ -64,6 +68,10 @@ describe('MessagesService — chat turn lifecycle', () => {
         key === 'ai.persistIntervalMs' ? persistIntervalMs : undefined,
     };
 
+    // READY-file attachments are resolved before beginChatTurn (pre-flight),
+    // so no SSE byte is written for a rejected attachment.
+    filesService = { getReadyContext: jest.fn().mockResolvedValue(readyFiles) };
+
     registry = new GenerationRegistry();
     service = new MessagesService(
       messagesRepository as any,
@@ -72,6 +80,7 @@ describe('MessagesService — chat turn lifecycle', () => {
       aiProviderService as any,
       registry,
       configService as any,
+      filesService as any,
     );
   };
 
@@ -403,6 +412,138 @@ describe('MessagesService — chat turn lifecycle', () => {
     expect(handle.userMessage).toMatchObject({ content: 'سلام', clientMessageId: 'brand-new' });
     expect(handle.replay).toBe(false);
   });
+
+  // ---- attached files (Day 5-6 chat integration) ----
+
+  it('resolves attached files per CONVERSATION during pre-flight', async () => {
+    setup();
+
+    await service.assertChatTurnAllowed(
+      'user-1',
+      'conv-1',
+      undefined,
+      { clientMessageId: undefined, content: 'سؤال' },
+      ['file-1'],
+    );
+
+    // Conversation scoping is what enforces chat isolation between conversations.
+    expect(filesService.getReadyContext).toHaveBeenCalledWith('conv-1', ['file-1']);
+  });
+
+  it('never queries files when the turn has no attachments', async () => {
+    setup();
+
+    await service.assertChatTurnAllowed('user-1', 'conv-1', undefined, {
+      clientMessageId: undefined,
+      content: 'سؤال',
+    });
+
+    expect(filesService.getReadyContext).not.toHaveBeenCalled();
+  });
+
+  it('rejects the send (400, pre-stream) when an attached file is not READY', async () => {
+    setup();
+    filesService.getReadyContext.mockRejectedValue(
+      new BadRequestException('این فایل هنوز در حال پردازش است.'),
+    );
+
+    await expect(
+      service.assertChatTurnAllowed(
+        'user-1',
+        'conv-1',
+        undefined,
+        { clientMessageId: undefined, content: 'سؤال' },
+        ['file-1'],
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('injects READY file content into the prompt but keeps the stored message text', async () => {
+    setup({
+      readyFiles: [
+        {
+          id: 'file-1',
+          originalName: 'report.pdf',
+          mimeType: 'application/pdf',
+          extractedText: 'FACT: the answer is 42',
+        },
+      ],
+    });
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield 'ok';
+    });
+
+    const attachments = await service.assertChatTurnAllowed(
+      'user-1',
+      'conv-1',
+      undefined,
+      { clientMessageId: undefined, content: 'این فایل درباره چیست؟' },
+      ['file-1'],
+    );
+    const { handle, done } = await begin(
+      'user-1',
+      'conv-1',
+      'این فایل درباره چیست؟',
+      undefined,
+      undefined,
+      attachments,
+    );
+    await done;
+
+    // The provider sees the attached content plus the question…
+    const prompt = aiProviderService.streamChat.mock.calls[0][0].at(-1).content;
+    expect(prompt).toContain('FACT: the answer is 42');
+    expect(prompt).toContain('این فایل درباره چیست؟');
+    // …while the conversation history stores only what the user typed, with
+    // the attachment referenced by id.
+    expect(handle.userMessage.content).toBe('این فایل درباره چیست؟');
+    expect(handle.userMessage.attachedFileIds).toEqual(['file-1']);
+  });
+
+  it('records null attachments and an unchanged prompt for a plain turn', async () => {
+    setup();
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield 'ok';
+    });
+
+    const { handle, done } = await begin('user-1', 'conv-1', 'پیام ساده', undefined, undefined);
+    await done;
+
+    expect(handle.userMessage.attachedFileIds).toBeNull();
+    expect(aiProviderService.streamChat.mock.calls[0][0].at(-1).content).toBe('پیام ساده');
+  });
+
+  it('keeps the original attachments on a replay (retry) of the same turn', async () => {
+    setup({
+      existingUserByClientMid: { id: 'cmid-1', content: 'سلام' },
+      readyFiles: [
+        {
+          id: 'file-1',
+          originalName: 'report.pdf',
+          mimeType: 'application/pdf',
+          extractedText: 'body',
+        },
+      ],
+    });
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield 'ok';
+    });
+
+    const attachments = await service.assertChatTurnAllowed(
+      'user-1',
+      'conv-1',
+      undefined,
+      { clientMessageId: 'cmid-1', content: 'سلام' },
+      ['file-1'],
+    );
+    const { handle, done } = await begin('user-1', 'conv-1', 'سلام', undefined, 'cmid-1', attachments);
+    await done;
+
+    expect(handle.replay).toBe(true);
+    expect(handle.userMessage.id).toBe('user-existing');
+    // Retrying must not create a second user row.
+    expect(messagesRepository.saved.filter((row: any) => row.role === 'user')).toHaveLength(0);
+  });
 });
 
 describe('MessagesService — reconnect / recovery', () => {
@@ -412,6 +553,7 @@ describe('MessagesService — reconnect / recovery', () => {
   let conversationsService: any;
   let modelsService: any;
   let aiProviderService: { streamChat: jest.Mock };
+  let filesService: { getReadyContext: jest.Mock };
 
   const setup = ({ history = [] }: { history?: any[] } = {}) => {
     conversationsService = {
@@ -426,6 +568,7 @@ describe('MessagesService — reconnect / recovery', () => {
       resolveChatModel: jest.fn().mockResolvedValue({ id: 'model-1', name: 'Mock', provider: 'mock' }),
     };
     messagesRepository = createMockRepository();
+    filesService = { getReadyContext: jest.fn().mockResolvedValue([]) };
     registry = new GenerationRegistry();
     service = new MessagesService(
       messagesRepository as any,
@@ -434,6 +577,7 @@ describe('MessagesService — reconnect / recovery', () => {
       aiProviderService as any,
       registry,
       { get: () => 60_000 } as any,
+      filesService as any,
     );
   };
 

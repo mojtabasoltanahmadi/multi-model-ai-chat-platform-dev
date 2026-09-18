@@ -50,3 +50,15 @@ export function displayNameFromEmail(email: string | null | undefined): string {
   const head = Array.from(firstFragment)[0]!;
   return /[A-Za-z]/.test(head) ? head.toUpperCase() + firstFragment.slice(1) : firstFragment;
 }
+
+/** «۲٫۴ مگابایت» style size label for uploaded files. */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '۰';
+  const units = ['بایت', 'کیلوبایت', 'مگابایت', 'گیگابایت'];
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** exponent;
+  const formatted = new Intl.NumberFormat('fa-IR', {
+    maximumFractionDigits: exponent === 0 ? 0 : 1,
+  }).format(value);
+  return `${formatted} ${units[exponent]}`;
+}

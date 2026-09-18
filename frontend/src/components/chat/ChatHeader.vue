@@ -37,7 +37,7 @@ const emit = defineEmits<{ 'update:modelId': [id: string]; openMenu: [] }>();
       :model-id="modelId"
       placement="down"
       compact
-      @update:model-id="emit('update:modelId', $event)"
+      @select="emit('update:modelId', $event)"
     />
   </header>
 </template>

@@ -1,7 +1,9 @@
 # Architecture
 
 A **modular monolith**: one NestJS application where each folder owns one domain.
-No microservices, queues, or external infrastructure beyond PostgreSQL.
+No microservices. Infrastructure is deliberately small: PostgreSQL (data),
+Redis + BullMQ (file-processing jobs) and MinIO (uploaded objects), all from the
+single `infra/docker-compose.yml`.
 
 ```
 backend/src/
@@ -10,6 +12,8 @@ backend/src/
 ├── conversations/   conversation entity, CRUD-lite, ownership lookup
 ├── messages/        message entity, chat-turn orchestration, SSE controller
 ├── models/          AiModel entity, admin management, chat model resolution
+├── files/           upload, MinIO storage, validation, BullMQ queue + worker,
+│                    extraction (PDF/Excel/OCR), admin file view
 ├── ai/              provider abstraction (mock + openai-compatible)
 ├── common/          guards, decorators, global exception filter
 ├── config/          typed env configuration
@@ -27,6 +31,10 @@ messages(id, conversation_id → conversations, role,    role ∈ {user, assista
                                                       null for user messages
 ai_models(id, name, provider, external_model_id,       provider ∈ {mock, openai-compatible}
           base_url, api_key, is_active, is_free, is_default)
+files(id, user_id → users, conversation_id →          status ∈ {UPLOADING, PROCESSING,
+      conversations, original_name, mime_type,         READY, FAILED}
+      size, storage_key, status, extracted_text,
+      error_message, attempts, timestamps)             binary lives in MinIO
 ```
 
 Foreign keys use `ON DELETE CASCADE` from messages→conversations→users, and
@@ -165,4 +173,33 @@ seams it relies on:
 - `synchronize: true` schema management (documented dev convenience; production would use migrations).
 - No refresh tokens; token expiry is 1 day.
 - API keys stored unencrypted in the database.
-- No rate limiting / observability / queues — no requirement yet.
+- No rate limiting and no observability stack — no requirement yet.
+- File processing is the one queued workload: an in-process BullMQ worker (see the
+  next section), not a separate service.
+
+## File upload & background processing
+
+The chat path is latency-critical, so file processing is never done inside a request:
+
+```
+POST /api/conversations/:id/files   (JWT, multipart, owner-checked)
+  │ validate (size, declared MIME, content signature, extension)
+  │ MinIO put   files/{userId}/{conversationId}/{uuid}.<ext>
+  │ files row   status = UPLOADING
+  │ BullMQ add  file-processing { fileId }        ← metadata only
+  ▼ 201 quickly; extraction happens later
+Worker (in-process, concurrency 2)
+  │ atomic claim  UPLOADING|PROCESSING → PROCESSING
+  │ MinIO get → extract (pdf-parse | SheetJS | tesseract.js)
+  │ persist text + READY  |  safe reason + FAILED
+  ▼
+GET /api/files/:id (owner-only)   ← the UI polls this while a file is not terminal
+```
+
+Invariants: `READY` implies extracted content was persisted in the same update;
+`PROCESSING` implies a recoverable job (a 60 s sweeper re-enqueues orphans); `FAILED`
+always carries a safe user-displayable reason; only `READY` files may enter an AI
+prompt, and only when they belong to the conversation being written to. Transient
+errors retry (3 attempts, exponential backoff) while corrupt/unsupported content
+fails immediately. Full details, limits and recovery strategies:
+[FILES.md](FILES.md).

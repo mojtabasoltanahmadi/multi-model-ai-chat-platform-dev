@@ -29,3 +29,6 @@ coverage/
 # Tooling artifacts
 .claude/plans/
 .freebuff/
+
+# OCR language data downloaded at runtime
+*.traineddata

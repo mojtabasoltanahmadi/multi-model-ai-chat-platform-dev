@@ -50,7 +50,81 @@ export interface Message {
   modelId: string | null;
   /** Client-generated idempotency token; present on user rows. */
   clientMessageId: string | null;
+  /**
+   * READY files that were attached as context to this user turn. The ids are
+   * resolved against the conversation's file list to render the chips, so a
+   * reload shows the attachment without the file content ever leaving the
+   * backend.
+   */
+  attachedFileIds: string[] | null;
   createdAt: string;
+}
+
+/**
+ * Lifecycle of an uploaded file (backend `FileStatus`).
+ * UPLOADING/PROCESSING are in-flight; only READY content may be used as chat
+ * context; FAILED carries a user-safe reason.
+ */
+export type ChatFileStatus = 'UPLOADING' | 'PROCESSING' | 'READY' | 'FAILED';
+
+export interface ChatFile {
+  id: string;
+  userId: string;
+  conversationId: string;
+  originalName: string;
+  mimeType: string;
+  size: number;
+  status: ChatFileStatus;
+  /** Safe, human-readable failure reason (Persian) — never a stack trace. */
+  errorMessage: string | null;
+  attempts: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Client-side upload lifecycle of a composer chip. Independent of the server
+ * status: a file can be `completed` here (fully uploaded) while the backend is
+ * still `PROCESSING` its content.
+ */
+export type FileUploadState = 'pending' | 'uploading' | 'completed' | 'error';
+
+/**
+ * A file waiting in the composer: the server record (once it exists) plus the
+ * local upload bookkeeping the chip renders. `source` is the picked File, kept
+ * so a failed upload can be retried without asking the user to pick it again.
+ */
+export interface ComposerFile extends ChatFile {
+  upload: FileUploadState;
+  /** Client-side upload failure reason — distinct from a processing failure. */
+  uploadError?: string | null;
+  source?: File;
+}
+
+/** Admin file view row: the file plus owner/conversation context. */
+export interface AdminChatFile extends ChatFile {
+  userEmail: string | null;
+  conversationTitle: string | null;
+}
+
+/** Per-status row counts for the admin panel. */
+export interface FileStatusCounts {
+  UPLOADING: number;
+  PROCESSING: number;
+  READY: number;
+  FAILED: number;
+  total: number;
+}
+
+export interface AdminFilesResponse {
+  total: number;
+  counts: FileStatusCounts;
+  items: AdminChatFile[];
+}
+
+export interface AdminFileStatsResponse {
+  counts: FileStatusCounts;
+  queue: { waiting: number; active: number; failed: number; completed: number } | null;
 }
 
 export type AiProviderKind = 'mock' | 'openai-compatible';
@@ -73,6 +147,11 @@ export interface AiModel {
 export interface SendMessagePayload {
   content: string;
   modelId?: string;
+  /**
+   * READY files of THIS conversation to use as context. The backend rejects
+   * unknown/foreign/not-yet-ready ids with 400 before the stream opens.
+   */
+  fileIds?: string[];
   /**
    * Client-generated idempotency token (≤ 64 chars). Two requests with the
    * same token for the same conversation reuse the original user row and

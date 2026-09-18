@@ -35,6 +35,10 @@ JWT payload: `{ sub: userId, email, role }`, expires in `JWT_EXPIRES_IN` (defaul
 - `clientMessageId` optional; opaque client-generated token (≤ 64 chars) used for idempotency.
   The same value may also be sent as the `Idempotency-Key` HTTP header — both are accepted,
   the header is just a convenience for proxies and replay logs.
+- `fileIds` optional; up to 6 **`READY`** files **of this conversation** whose extracted text is
+  added to the prompt. Any id that is unknown, belongs to another conversation/user, or is not
+  `READY` rejects the send with 400 (before the stream starts). See
+  [FILES.md](FILES.md#chat-integration).
 
 ### Pre-flight
 
@@ -161,6 +165,38 @@ interface Message {
 }
 ```
 
+## Files
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/conversations/:conversationId/files` | `multipart/form-data`, field `file`. **201** with the safe file shape. Foreign conversation → 404; empty/unsupported/mismatched content → 400; over the size limit → 413. Extraction never happens in this request. |
+| GET | `/conversations/:conversationId/files` | files of one conversation, oldest first (used to restore statuses after a refresh) |
+| GET | `/files/:fileId` | one file — the polling endpoint; foreign file → 404 |
+| GET | `/files/:fileId/content` | owner-only bytes used for thumbnails, the preview viewer and downloads. Images/PDF are `Content-Disposition: inline` (plus `X-Content-Type-Options: nosniff`); everything else, or `?download=1`, is an `attachment`, with the original name echoed as `filename*=UTF-8''…` so non-ASCII names survive. Foreign file → 404, missing object → 404, no token → 401. |
+| GET | `/admin/files?status=&limit=&offset=` | **admin** — `{ total, counts: {UPLOADING, PROCESSING, READY, FAILED, total}, items[] }` with user email + conversation title |
+| GET | `/admin/files/stats` | **admin** — `{ counts, queue: { waiting, active, failed, completed } \| null }` |
+| POST | `/admin/files/:fileId/reprocess` | **admin** — the only path from `READY`/`FAILED` back to `PROCESSING`; 400 for any other status |
+
+Safe file shape (never includes extracted text or the storage key):
+
+```ts
+{
+  id: string;
+  userId: string;
+  conversationId: string;
+  originalName: string;      // sanitized display name
+  mimeType: string;          // resolved from content, not the client claim
+  size: number;
+  status: 'UPLOADING' | 'PROCESSING' | 'READY' | 'FAILED';
+  errorMessage: string | null; // safe reason, set when FAILED
+  attempts: number;
+  createdAt: string;         // ISO
+  updatedAt: string;         // ISO — changes when the status changes
+}
+```
+
+Upload limits and lifecycle: [FILES.md](FILES.md).
+
 ## Models (authenticated)
 
 | Method | Path | Notes |
@@ -181,9 +217,10 @@ interface Message {
 
 | Status | Meaning |
 |---|---|
-| 400 | validation failure (empty/long message, bad UUID, inactive model, default-model rule incl. free access, idempotency content collision) |
+| 400 | validation failure (empty/long message, bad UUID, inactive model, default-model rule incl. free access, idempotency content collision, file content/MIME/extension mismatch, attached file not `READY` or foreign, illegal file status transition, reprocess of a non-terminal file) |
 | 401 | missing/invalid/expired JWT |
 | 403 | authenticated but insufficient role — or a model the caller's plan is not allowed to use |
 | 404 | unknown or foreign resource (no existence leak) |
 | 409 | duplicate email on register |
+| 413 | uploaded file exceeds `FILE_MAX_SIZE_BYTES` (rejected by multer before the handler runs) |
 | 500 | unexpected error (clean JSON, details only in server logs) |

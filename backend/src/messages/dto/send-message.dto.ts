@@ -1,4 +1,7 @@
+import { DEFAULT_MAX_FILES_PER_MESSAGE } from '../../config/configuration';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsOptional,
   IsString,
   IsUUID,
@@ -41,4 +44,17 @@ export class SendMessageDto {
   @IsString({ message: 'شناسه تکرارناپذیری پیام باید متن باشد.' })
   @MaxLength(64, { message: 'شناسه تکرارناپذیری پیام حداکثر ۶۴ کاراکتر است.' })
   clientMessageId?: string;
+
+  /**
+   * Ready files of THIS conversation to use as AI context. Any id that is
+   * unknown, foreign, still processing or failed is rejected — the file
+   * attachment never becomes a way to read another conversation's data.
+   */
+  @IsOptional()
+  @IsArray({ message: 'فایل‌های پیوست باید فهرستی از شناسه‌ها باشند.' })
+  @ArrayMaxSize(DEFAULT_MAX_FILES_PER_MESSAGE, {
+    message: `حداکثر ${DEFAULT_MAX_FILES_PER_MESSAGE} فایل می‌تواند در هر پیام پیوست شود.`,
+  })
+  @IsUUID('4', { each: true, message: 'شناسه فایل نامعتبر است.' })
+  fileIds?: string[];
 }

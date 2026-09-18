@@ -1,4 +1,4 @@
-import type { AiModel, AuthResponse, Message, SendMessagePayload } from './types';
+import type { AiModel, AuthResponse, ChatFile, Message, SendMessagePayload } from './types';
 
 const BASE = '/api';
 const TOKEN_KEY = 'hooshyar.token';
@@ -78,6 +78,118 @@ export async function api<T>(
     throw new ApiError(extractError(json, 'خطایی رخ داد. لطفاً دوباره تلاش کنید.'));
   }
   return json as T;
+}
+
+// ---- File uploads (Day 5-6) ----
+
+/** Mirrors the backend default; the server remains the source of truth. */
+export const MAX_FILE_SIZE_MB = 10;
+
+/** Mirrors the backend's per-message file cap (`FILE_MAX_PER_MESSAGE`). */
+export const MAX_FILES_PER_MESSAGE = 6;
+
+/** Extensions the backend accepts (content is still validated server-side). */
+export const ACCEPTED_FILE_TYPES =
+  '.pdf,.xls,.xlsx,.png,.jpg,.jpeg,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/png,image/jpeg';
+
+/**
+ * Uploads one file to a conversation. Uses multipart/form-data, so it cannot
+ * go through `api()` (which always sends JSON): the browser must set the
+ * boundary itself, and only the Authorization header is added.
+ */
+export async function uploadConversationFile(
+  conversationId: string,
+  file: File,
+): Promise<ChatFile> {
+  const form = new FormData();
+  form.append('file', file, file.name);
+
+  let response: Response;
+  try {
+    response = await fetch(`${BASE}/conversations/${conversationId}/files`, {
+      method: 'POST',
+      headers: authHeader(),
+      body: form,
+    });
+  } catch {
+    throw new ApiError('ارتباط با سرور برقرار نشد. آپلود انجام نشد.');
+  }
+
+  if (response.status === 401 && loadSession()) {
+    clearSession();
+    sessionExpiredHandler?.();
+    throw new ApiError('نشست شما منقضی شده است. دوباره وارد شوید.');
+  }
+
+  let json: unknown = null;
+  try {
+    json = await response.json();
+  } catch {
+    /* empty body */
+  }
+
+  if (!response.ok) {
+    throw new ApiError(extractError(json, 'آپلود فایل ناموفق بود. لطفاً دوباره تلاش کنید.'));
+  }
+  return json as ChatFile;
+}
+
+/** Files of one conversation (statuses only — never the extracted text). */
+export function fetchConversationFiles(conversationId: string): Promise<ChatFile[]> {
+  return api<ChatFile[]>(`/conversations/${conversationId}/files`);
+}
+
+/** Single file status, used to poll a file until it is READY/FAILED. */
+export function fetchChatFile(fileId: string): Promise<ChatFile> {
+  return api<ChatFile>(`/files/${fileId}`);
+}
+
+/**
+ * Downloads the stored bytes of a file the caller owns (thumbnails, previews
+ * and downloads). The response is binary, so it bypasses `api()`; the JWT is
+ * required because MinIO itself is never exposed to the browser.
+ */
+export async function fetchFileContent(fileId: string): Promise<Blob> {
+  let response: Response;
+  try {
+    response = await fetch(`${BASE}/files/${fileId}/content`, { headers: authHeader() });
+  } catch {
+    throw new ApiError('دریافت فایل ممکن نشد. ارتباط با سرور برقرار نشد.');
+  }
+
+  if (response.status === 401 && loadSession()) {
+    clearSession();
+    sessionExpiredHandler?.();
+    throw new ApiError('نشست شما منقضی شده است. دوباره وارد شوید.');
+  }
+
+  if (!response.ok) {
+    let message = 'دریافت فایل ممکن نشد.';
+    try {
+      message = extractError(await response.json(), message);
+    } catch {
+      /* non-JSON error body — keep the fallback */
+    }
+    throw new ApiError(message);
+  }
+
+  return response.blob();
+}
+
+/**
+ * Client-side pre-check so an obviously rejected file never costs an upload.
+ * The backend stays the source of truth (size, signature and MIME are all
+ * re-validated server-side).
+ */
+export function describeLocalFileProblem(file: File): string | null {
+  if (file.size === 0) return 'فایل خالی است و قابل قبول نیست.';
+  if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
+    return `حجم فایل بیش از حد مجاز است (حداکثر ${MAX_FILE_SIZE_MB} مگابایت).`;
+  }
+  if (!/\.(pdf|xls|xlsx|png|jpe?g)$/i.test(file.name)) {
+    return 'فقط فایل PDF، Excel و تصویر (PNG/JPEG) قابل پیوست است.';
+  }
+  return null;
 }
 
 // ---- SSE streaming (fetch + ReadableStream; EventSource cannot POST with JWT) ----

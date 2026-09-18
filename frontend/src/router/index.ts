@@ -25,6 +25,14 @@ const routes = [
     component: () => import('../views/AdminModelsView.vue'),
     meta: { adminOnly: true },
   },
+  {
+    // Route guard is convenience only — the backend enforces @Roles('admin')
+    // on every /admin/files endpoint.
+    path: '/admin/files',
+    name: 'admin-files',
+    component: () => import('../views/AdminFilesView.vue'),
+    meta: { adminOnly: true },
+  },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ];
 

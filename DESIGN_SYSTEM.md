@@ -339,10 +339,39 @@ auth brand panel, empty chat, admin nav.
       detail never leaked) + primary-accent **تلاش مجدد** button.
   Retry is disabled while another send is in flight. No heavy bubbles.
 * `chat/MessageComposer.vue` — **reference-style two-row composer**: autosizing textarea
-  (Enter=send, Shift+Enter=newline) on top; toolbar below with attachment button
-  («به‌زودی»), model selector, char counter near the 4000 limit, and a **gradient
-  circular send button** (stop variant while streaming). Rounded `--radius-xl` box,
-  focus ring + glow, streaming status line beneath.
+  (Enter=send, Shift+Enter=newline) on top; toolbar below with the **live attachment
+  button** (multi-select: rejects unsupported/oversized files locally before upload, and
+  accepts new files even while an earlier upload runs), model selector, char counter near
+  the 4000 limit, and a **gradient circular send button** (stop variant while streaming).
+  Rounded `--radius-xl` box, focus ring + glow, streaming status line beneath. Send is
+  disabled only while an upload is in flight — the user keeps typing, and a processing
+  file never blocks the message.
+* File row (inside `MessageComposer.vue`) — the files being written into the message render
+  **inside the composer box**, in a wrapping row above the text row, separated by a hairline
+  (`--border-subtle`): the box grows to hold them instead of the chips living in a second
+  surface. No title, count, badge or explanatory copy — not even an upload notice: the spinner on
+  each chip is the progress, and the disabled Send button explains itself through its title and
+  `aria-label`. Typing stays possible while a transfer runs; only sending waits.
+* `chat/FileChip.vue` — one file, deliberately small (~125 px) so four to five share one row:
+  thumbnail (`--radius-xs`, 1.3rem, `object-fit: cover`) for images, otherwise a compact kind
+  icon (document / sheet / image, inline SVG, 11px), an ellipsized name capped at 4.2rem, and an
+  **icon-only** status affordance — a clock while queued, a spinner while transferring or
+  processing, a check once uploaded/ready, a cross on failure. No status *words* are rendered:
+  the tooltip (`name — size — status`, plus the safe failure reason) and the accessible name
+  carry them, which is what lets several chips fit on a line. `flex: 0 0 auto` means chips wrap at their natural width instead of being crushed in
+  a narrow panel. Tone follows the semantic palette (`--info-soft` while working,
+  `--success-soft` when ready, `--danger-soft` on failure) and matches the admin status pills.
+  `role="status"`; a `READY` chip becomes a button that opens the viewer; a removable chip
+  carries its own × (aria-label «حذف فایل …») without shifting the layout; a chip whose upload
+  failed adds a small retry glyph (aria-label «تلاش دوباره برای آپلود …») next to the ×, so the
+  recovery action sits on the file it belongs to instead of somewhere else in the composer.
+* `chat/FileViewerModal.vue` — full-screen preview sheet: overlay at `--z-modal` with a 10px
+  `backdrop-filter: blur` so the conversation stays visible but out of focus; panel
+  `min(62rem, 100%)`. Header = kind badge + filename + size + a danger-tinted × close;
+  body = the image (`object-fit: contain`) or an embedded PDF page (white page regardless of
+  theme), or a short explanation for non-renderable types; footer = primary «دانلود فایل» plus a
+  ghost «بستن». Esc, click-outside and both buttons close it; body scroll is locked while open
+  and focus returns to the chip afterwards.
 * `admin/AdminModelPanel.vue` — the **configuration drawer** (create + edit). Header:
   ProviderMark + name + model-id + status badge. Sections (accent-rule headings):
   تنظیمات پایه (name, provider radio cards with tiles, model id, base URL, API key —
@@ -356,6 +385,9 @@ auth brand panel, empty chat, admin nav.
   fill + inset accent bar. Dense table ≥768px, stacked cards below with labeled controls.
 * `admin/ModelStatus.vue` — badge pair (active/inactive + Free/Premium) for the mobile
   cards.
+* `admin/FileTable.vue` — upload-processing table: name (+kind icon), owner email,
+  conversation title, type, size, `FileChip` status, created-at, safe error text, and a
+  Reprocess action on `READY`/`FAILED` rows. Dense table ≥768px, stacked cards below.
 
 ---
 
@@ -399,6 +431,16 @@ An **offline banner** slides in under the chat header (200ms ease-out) when
 `aria-live="polite"`, and disappears the instant connectivity returns. The banner
 is a UI HINT — it never blocks sending (a request will still surface its own error).
 
+**Attachments** live inside the composer box (see the file row above). The upload starts the
+moment files are picked, so the chip's spinner reflects a real request, and the chip only turns
+into a success tint when the backend says `READY` — the UI never optimistically claims success.
+While any chip is non-terminal the view polls the file status endpoint; after a reload the chips
+and their statuses are rebuilt from the conversation's file list (never from memory). A failed
+chip keeps a red tone and its reason, and sending with a non-ready chip is refused with a clear
+toast rather than a silently empty answer. Chips on sent messages are clickable once `READY`
+and open the viewer; they always read right-to-left with the bubble (`dir="rtl"` is explicit
+because a Latin filename under `dir="auto"` would otherwise flip their order and edge).
+
 The **last-opened conversation** persists across reloads (`localStorage`
 `hooshyar.active-conversation`, UUID-validated). Foreign / deleted ids are
 silently cleared.
@@ -419,6 +461,14 @@ destructive delete stays a confirm modal. Loading skeleton; load failure: retry
 ErrorState; outcome via toast. Switch controls toggle inline via `PATCH` and re-fetch;
 backend refusals (e.g. un-freeing the default model) surface as error toasts. Editing
 sends a PATCH only with a non-empty API key (empty field = keep stored key).
+
+## Admin Files
+
+Same shell as Admin List. A status filter (`همه` / `UPLOADING` / `PROCESSING` / `READY` /
+`FAILED`) with per-status counts plus a queue-depth line, a dense table / stacked cards, and an
+empty state when a filter matches nothing. Failure reasons are shown as-is (they are already
+user-safe) and never as raw stack traces; the Reprocess action is only offered on terminal rows
+and its outcome surfaces as a toast.
 
 ---
 
@@ -641,6 +691,89 @@ Date:     2026-09-18
 Affected: tokens.css, useTheme.ts, index.html (pre-paint + theme-color),
           ThemeToggle (4-way), AmbientGlow, AppSidebar, AdminModelsView,
           MessageComposer, AppInput (region/focus tokens).
+
+Decision: A file chip only shows «آماده» when the backend says READY — the upload status is
+          never advanced optimistically, and a non-ready attachment blocks sending with an
+          explicit message instead of being dropped silently
+Reason:   The file's status is server state (queued, extracted, failed). A hopeful UI would
+          answer from a file whose text does not exist yet and would hide genuine failures;
+          telling the user «این فایل هنوز در حال پردازش است» is honest and actionable.
+Date:     2026-09-16
+Affected: FileChip.vue, MessageComposer.vue, ChatView.vue.
+
+Decision: File chips reuse the existing status-pill language (soft semantic tint + inline
+          SVG icon) rather than introducing an upload-specific visual pattern
+Reason:   The same four states already exist for models (active/inactive/free) and there is no
+          new affordance to invent — a new pattern would have to be maintained in two places.
+          Working states borrow the info palette, ready the success palette, failure the
+          danger palette, so a row of chips reads at a glance in both themes.
+Date:     2026-09-16
+Affected: FileChip.vue, FileTable.vue.
+
+Decision: Pending files render inside the composer box, in a row above the text row
+Reason:   A file chosen for the message being written belongs to that message, so it grows the
+          same box instead of a second surface the user has to read as a separate object. The
+          row is separated by a hairline rather than a panel, carries no label or counter
+          (the chips say what they are), and each chip removes itself — so the box stays the
+          single place a message is composed.
+Date:     2026-09-16
+Affected: MessageComposer.vue.
+
+Decision: A ready file alone can be sent, with a neutral instruction standing in for the draft
+Reason:   Requiring text before the button unlocks invents friction the product does not need
+          ("analyze this file" is the obvious intent of attaching one). The backend still
+          requires non-blank content, so the UI supplies «این فایل را بررسی کن.» / «این فایل‌ها
+          را بررسی کن.» instead of relaxing an invariant the whole chat path depends on, and
+          the recorded message stays self-explanatory in history and in the conversation title.
+Date:     2026-09-16
+Affected: MessageComposer.vue, ChatView.vue.
+
+Decision: Send is disabled while an upload is in flight, but never while a file is processing
+Reason:   An uploading file is not in the conversation yet, so sending would drop it silently —
+          that is a real data-loss risk and deserves a blocked action with an explanation.
+          Once uploaded, the file is server-side work; blocking chat on it would violate the
+          product rule that file processing never stalls the conversation.
+Date:     2026-09-16
+Affected: MessageComposer.vue, ChatView.vue.
+
+Decision: Previews and downloads are proxied through the API instead of presigned storage URLs
+Reason:   Ownership is already enforced per request in the backend, MinIO stays private, and no
+          storage credentials or bucket URLs reach the browser — the same rule the rest of the
+          file feature follows. The cost (bytes through the backend) is acceptable at MVP scale.
+Date:     2026-09-16
+Affected: files.controller.ts, FileViewerModal.vue, api/client.ts.
+
+Decision: Files upload one at a time, in pick order, and Send waits for the whole batch
+Reason:   A user picking four files wants to see which one is being transferred, which are still
+          waiting and what already landed — a parallel burst of requests only shows four spinners
+          and makes the first "done" ambiguous. A sequential queue gives every chip its own
+          `pending → uploading → completed` story (plus `error` with a retry on that chip), keeps
+          the server's multipart handling gentle, and turns precedence into something the user can
+          watch. Because an uploading file is not in the conversation yet, Send stays locked until
+          every picked file is uploaded — the textarea is never disabled, so the draft keeps
+          being written and survives the whole batch.
+Date:     2026-09-17
+Affected: ChatView.vue, MessageComposer.vue, FileChip.vue, utils/uploadQueue.ts.
+
+Decision: A failed upload halts the queue and is retried from its own chip, never skipped
+Reason:   Continuing past the failure would upload the rest behind the user's back while they are
+          deciding what to do about the file that broke (and changing the file that broke would
+          then land mid-queue). Halting keeps the batch's meaning intact: the chip that failed
+          carries a retry (the picked File is still in memory, so nothing has to be re-selected)
+          and Send stays locked — the error reason is the button's accessible name — until the
+          file is retried successfully or explicitly removed, which resumes the rest.
+Date:     2026-09-17
+Affected: ChatView.vue, utils/uploadQueue.ts, FileChip.vue.
+
+Decision: Chip status is an icon, never a word, and a message carries at most six chips
+Reason:   Chips sit inside the message box the user is typing in, so every word spent on
+          «آماده» / «در حال آپلود…» costs space the draft needs: the words moved into the tooltip
+          and the accessible name, the visible chip kept its icon, and the name cap dropped far
+          enough that four to five chips fit one row at `--chat-measure`. The six-file ceiling
+          mirrors `FILE_MAX_PER_MESSAGE` in the picker (trimming a batch with a toast) so the
+          limit is felt before the server has to reject a request.
+Date:     2026-09-17
+Affected: FileChip.vue, MessageComposer.vue, ChatView.vue, api/client.ts.
 ```
 
 ---

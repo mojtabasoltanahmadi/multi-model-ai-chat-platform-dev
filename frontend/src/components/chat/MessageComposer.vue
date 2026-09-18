@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
 import ModelSelector from './ModelSelector.vue';
-import type { AiModel } from '../../api/types';
+import FileChip from './FileChip.vue';
+import { ACCEPTED_FILE_TYPES } from '../../api/client';
+import type { AiModel, ChatFile, ComposerFile } from '../../api/types';
 
 const MAX_LENGTH = 4000;
 
@@ -9,24 +11,84 @@ interface Props {
   models: AiModel[];
   modelId: string;
   streaming: boolean;
+  /** Files added to the next message, each with its own upload state. */
+  attachments?: ComposerFile[];
+  /** Object URLs for image thumbnails, keyed by file id. */
+  previews?: Record<string, string>;
+  /** Asks the view to fetch a thumbnail for a file restored from the server. */
+  requestPreview?: (file: ComposerFile) => void;
   disabled?: boolean;
   /** Shown when no conversation is active — sending will create one. */
   hint?: string;
 }
 
-const props = withDefaults(defineProps<Props>(), { disabled: false, hint: '' });
+const props = withDefaults(defineProps<Props>(), {
+  disabled: false,
+  hint: '',
+  attachments: () => [],
+  previews: () => ({}),
+  requestPreview: undefined,
+});
 const emit = defineEmits<{
   send: [content: string];
   stop: [];
   'update:modelId': [id: string];
+  attach: [files: File[]];
+  'remove-attachment': [fileId: string];
+  'retry-upload': [fileId: string];
+  'open-file': [file: ChatFile];
 }>();
 
 const draft = ref('');
 const textarea = ref<HTMLTextAreaElement | null>(null);
+const fileInput = ref<HTMLInputElement | null>(null);
 
-const canSend = computed(
-  () => !props.disabled && !props.streaming && draft.value.trim().length > 0,
+/** Files with an upload still outstanding: queued, in flight, or failed. */
+const uploadsPending = computed(() =>
+  props.attachments.filter((file) => file.upload !== 'completed'),
 );
+
+const failedUpload = computed(
+  () => uploadsPending.value.find((file) => file.upload === 'error') ?? null,
+);
+
+/** Uploaded files whose content is ready, so they can carry a message alone. */
+const readyAttachments = computed(() =>
+  props.attachments.filter((file) => file.upload === 'completed' && file.status === 'READY'),
+);
+
+/**
+ * Send is locked until every picked file has been uploaded — typing a message
+ * does not unlock it. A failed upload also keeps it locked until the user
+ * retries or removes that file. Server-side processing never blocks the chat,
+ * and a message without files behaves exactly as before.
+ */
+const canSend = computed(
+  () =>
+    !props.disabled &&
+    !props.streaming &&
+    uploadsPending.value.length === 0 &&
+    (draft.value.trim().length > 0 || readyAttachments.value.length > 0),
+);
+
+/** Why Send is locked; the button's tooltip and accessible name say it. */
+const sendLockReason = computed(() => {
+  if (failedUpload.value) return 'آپلود یک فایل ناموفق بود؛ دوباره تلاش کنید یا فایل را حذف کنید.';
+  if (uploadsPending.value.length > 0) return 'تا پایان آپلود همهٔ فایل‌ها امکان ارسال نیست.';
+  return '';
+});
+
+function pickFiles() {
+  fileInput.value?.click();
+}
+
+function onFilesChosen(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files ?? []);
+  if (files.length > 0) emit('attach', files);
+  // Reset so choosing the same files again still fires a change event.
+  input.value = '';
+}
 
 const counterVisible = computed(() => draft.value.length > MAX_LENGTH * 0.9);
 
@@ -59,10 +121,45 @@ defineExpose({ focus: () => textarea.value?.focus() });
 <template>
   <div class="composer" :class="{ 'composer--disabled': disabled }">
     <div v-if="hint" class="composer__hint">{{ hint }}</div>
-    <div
-      class="composer__box"
-      :class="{ 'composer__box--streaming': streaming }"
-    >
+
+    <!--
+      Files live INSIDE the input box, right where the user types: they are part
+      of the message being written, so the box grows to hold them.
+    -->
+    <div class="composer__box" :class="{ 'composer__box--streaming': streaming }">
+      <input
+        ref="fileInput"
+        type="file"
+        class="composer__file-input"
+        :accept="ACCEPTED_FILE_TYPES"
+        :disabled="disabled"
+        multiple
+        aria-hidden="true"
+        tabindex="-1"
+        @change="onFilesChosen"
+      />
+
+      <div v-if="attachments.length > 0" class="composer__files" aria-label="فایل‌های افزوده‌شده">
+        <FileChip
+          v-for="file in attachments"
+          :key="file.id"
+          :name="file.originalName"
+          :status="file.status"
+          :mime-type="file.mimeType"
+          :size="file.size"
+          :error-message="file.errorMessage"
+          :preview-url="previews[file.id] ?? null"
+          :request-preview="requestPreview ? () => requestPreview?.(file) : undefined"
+          :upload="file.upload"
+          :upload-error="file.uploadError"
+          :clickable="file.upload === 'completed' && file.status === 'READY'"
+          removable
+          @open="emit('open-file', file)"
+          @remove="emit('remove-attachment', file.id)"
+          @retry="emit('retry-upload', file.id)"
+        />
+      </div>
+
       <textarea
         ref="textarea"
         v-model="draft"
@@ -77,12 +174,17 @@ defineExpose({ focus: () => textarea.value?.focus() });
 
       <!-- Toolbar under the text, like the reference composer. -->
       <div class="composer__toolbar">
+        <!--
+          The attach button stays enabled while files upload: only Send locks,
+          so the user can keep adding files (and writing) the whole time.
+        -->
         <button
           type="button"
           class="composer__attach"
-          disabled
-          aria-label="پیوست فایل (به‌زودی)"
-          title="پیوست فایل — به‌زودی"
+          :disabled="disabled"
+          aria-label="افزودن فایل (PDF، Excel یا تصویر)"
+          title="افزودن فایل (PDF، Excel یا تصویر)"
+          @click="pickFiles"
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
             <path d="m21.4 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
@@ -94,7 +196,7 @@ defineExpose({ focus: () => textarea.value?.focus() });
           :model-id="modelId"
           placement="up"
           compact
-          @update:model-id="emit('update:modelId', $event)"
+          @select="emit('update:modelId', $event)"
         />
 
         <span class="composer__toolbar-spacer"></span>
@@ -124,7 +226,8 @@ defineExpose({ focus: () => textarea.value?.focus() });
           type="button"
           class="composer__send"
           :disabled="!canSend"
-          aria-label="ارسال پیام"
+          :aria-label="sendLockReason || 'ارسال پیام'"
+          :title="sendLockReason || 'ارسال پیام'"
           @click="send"
         >
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -181,6 +284,21 @@ defineExpose({ focus: () => textarea.value?.focus() });
   opacity: 0.65;
 }
 
+/* The file row sits above the text row, inside the box. */
+.composer__files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.05rem 0.1rem 0.4rem;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 0.3rem;
+}
+
+.composer__file-input {
+  display: none;
+}
+
 .composer__input {
   width: 100%;
   /* A textarea's intrinsic width (default cols) otherwise forces the whole
@@ -217,6 +335,19 @@ defineExpose({ focus: () => textarea.value?.focus() });
   border: none;
   border-radius: var(--radius-sm);
   color: var(--text-3);
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.composer__attach:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text-1);
+}
+
+.composer__attach:disabled {
+  color: var(--text-disabled);
+  cursor: not-allowed;
 }
 
 .composer__counter {
@@ -310,6 +441,12 @@ defineExpose({ focus: () => textarea.value?.focus() });
 @media (max-width: 640px) {
   .composer {
     padding: 0.5rem 0.9rem 0.8rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer__status-dot {
+    animation: none;
   }
 }
 </style>

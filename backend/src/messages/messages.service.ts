@@ -8,6 +8,8 @@ import { ModelsService } from '../models/models.service';
 import { AiProviderService } from '../ai/ai-provider.service';
 import { GenerationRegistry, GenerationEvent } from './generation.registry';
 import { AiModel } from '../models/ai-model.entity';
+import { FilesService, AttachedFileContext } from '../files/files.service';
+import { buildContextualPrompt } from './file-context';
 
 const NEW_CONVERSATION_TITLE = 'گفتگوی جدید';
 const TITLE_MAX_LENGTH = 60;
@@ -74,6 +76,7 @@ export interface ChatTurnHandle {
 export class MessagesService {
   private readonly logger = new Logger(MessagesService.name);
   private readonly persistIntervalMs: number;
+  private readonly maxFileContextChars: number;
 
   constructor(
     @InjectRepository(Message)
@@ -83,8 +86,10 @@ export class MessagesService {
     private readonly aiProviderService: AiProviderService,
     private readonly generationRegistry: GenerationRegistry,
     configService: ConfigService,
+    private readonly filesService: FilesService,
   ) {
     this.persistIntervalMs = configService.get<number>('ai.persistIntervalMs') ?? 1500;
+    this.maxFileContextChars = configService.get<number>('files.maxContextChars') ?? 24000;
   }
 
   /** Loads a user's conversation including its messages. */
@@ -103,9 +108,19 @@ export class MessagesService {
     conversationId: string,
     modelId?: string,
     idempotency?: { clientMessageId?: string; content: string },
-  ): Promise<void> {
+    fileIds?: string[],
+  ): Promise<AttachedFileContext[]> {
     await this.conversationsService.getOwned(userId, conversationId);
     await this.modelsService.resolveChatModel(modelId, 'free');
+
+    // Attached files: resolved once here (before any SSE byte is written) so
+    // a not-ready/foreign file becomes a normal JSON 400 for the client
+    // instead of an opaque mid-stream error. The resolved content is handed
+    // to beginChatTurn, so the text is read exactly once per turn.
+    const attachments =
+      fileIds && fileIds.length > 0
+        ? await this.filesService.getReadyContext(conversationId, fileIds)
+        : [];
 
     if (idempotency?.clientMessageId) {
       const existing = await this.messagesRepository.findOne({
@@ -124,6 +139,8 @@ export class MessagesService {
         );
       }
     }
+
+    return attachments;
   }
 
   /**
@@ -137,11 +154,16 @@ export class MessagesService {
     content: string,
     modelId: string | undefined,
     clientMessageId: string | undefined,
+    attachments: AttachedFileContext[] = [],
   ): Promise<ChatTurnHandle> {
     const { conversation, messages } =
       await this.conversationsService.getOwnedWithMessages(userId, conversationId);
 
     const model = await this.modelsService.resolveChatModel(modelId, 'free');
+
+    // Attachment ids recorded on the user row (null when the turn had none),
+    // so a refreshed client can re-render the chips from persisted state.
+    const attachedFileIds = attachments.length > 0 ? attachments.map((file) => file.id) : null;
 
     // ---- Idempotency: reuse the original user row if this is a retry. ----
     // Content-collision with the same clientMessageId was already rejected
@@ -167,6 +189,7 @@ export class MessagesService {
             role: 'user',
             content,
             clientMessageId,
+            attachedFileIds,
           }),
         );
       }
@@ -176,6 +199,7 @@ export class MessagesService {
           conversationId: conversation.id,
           role: 'user',
           content,
+          attachedFileIds,
         }),
       );
     }
@@ -200,10 +224,16 @@ export class MessagesService {
     );
 
     // Provider history from everything persisted up to and including the
-    // user row just resolved above.
+    // user row just resolved above. Attached READY files are injected as
+    // bounded context in front of THIS turn's question; the persisted user
+    // row keeps the user's own text (attachments are referenced by id).
+    // With no attachments the prompt is byte-identical to the old behaviour.
     const history = [
       ...messages.map((message) => ({ role: message.role, content: message.content })),
-      { role: 'user' as const, content: userMessage.content },
+      {
+        role: 'user' as const,
+        content: buildContextualPrompt(attachments, userMessage.content, this.maxFileContextChars),
+      },
     ];
 
     this.generationRegistry.register(assistantMessage.id);

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import AppAvatar from '../ui/AppAvatar.vue';
+import FileChip from './FileChip.vue';
 import { renderMarkdown } from '../../utils/markdown';
 import { formatTime } from '../../utils/format';
-import type { Message } from '../../api/types';
+import type { ChatFile, Message } from '../../api/types';
 
 interface Props {
   message: Message;
@@ -19,15 +20,24 @@ interface Props {
   streaming?: boolean;
   /** Disable the Retry button (e.g. while another send is in flight). */
   retryDisabled?: boolean;
+  /** Files this user turn was sent with (resolved from attachedFileIds). */
+  attachments?: ChatFile[];
+  /** Object URLs for image thumbnails, keyed by file id. */
+  previews?: Record<string, string>;
+  /** Asks the view to fetch a thumbnail for an image sent in an earlier session. */
+  requestPreview?: (file: ChatFile) => void;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   streaming: false,
   modelName: '',
   retryDisabled: false,
+  attachments: () => [],
+  previews: () => ({}),
+  requestPreview: undefined,
 });
 
-const emit = defineEmits<{ retry: [message: Message] }>();
+const emit = defineEmits<{ retry: [message: Message]; 'open-file': [file: ChatFile] }>();
 
 const copied = ref(false);
 const isUser = computed(() => props.message.role === 'user');
@@ -101,6 +111,27 @@ function retry() {
       }"
       :dir="isUser ? 'auto' : undefined"
     >
+      <!-- Files used as context for this user turn (persisted ids, resolved here). -->
+      <!--
+        dir="rtl" is explicit: the body uses dir="auto", and a Latin filename
+        ("report.pdf") would otherwise flip the chip order and edge to LTR.
+      -->
+      <div v-if="isUser && attachments.length > 0" class="message__attachments" dir="rtl">
+        <FileChip
+          v-for="file in attachments"
+          :key="file.id"
+          :name="file.originalName"
+          :status="file.status"
+          :mime-type="file.mimeType"
+          :size="file.size"
+          :error-message="file.errorMessage"
+          :preview-url="previews[file.id] ?? null"
+          :request-preview="requestPreview ? () => requestPreview?.(file) : undefined"
+          :clickable="file.status === 'READY'"
+          @open="emit('open-file', file)"
+        />
+      </div>
+
       <!-- eslint-disable-next-line vue/no-v-html — sanitized: markdown-it runs with html:false -->
       <div
         v-if="isUser"
@@ -210,6 +241,15 @@ function retry() {
 
 .message--user .message__body {
   max-width: min(46rem, 100%);
+}
+
+.message__attachments {
+  display: flex;
+  flex-wrap: wrap;
+  /* Chips always hug the bubble's edge, in the app's RTL direction. */
+  justify-content: flex-start;
+  gap: 0.35rem;
+  margin-bottom: 0.15rem;
 }
 
 .message__content--user {

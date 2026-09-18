@@ -1,14 +1,28 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AppSidebar from '../components/layout/AppSidebar.vue';
 import ChatHeader from '../components/chat/ChatHeader.vue';
 import EmptyChat from '../components/chat/EmptyChat.vue';
 import MessageItem from '../components/chat/MessageItem.vue';
 import MessageComposer from '../components/chat/MessageComposer.vue';
+import FileViewerModal from '../components/chat/FileViewerModal.vue';
 import AppSkeleton from '../components/ui/AppSkeleton.vue';
 import AmbientGlow from '../components/ui/AmbientGlow.vue';
-import { api, streamChatMessage, reconnectGenerationStream, type StreamHandle } from '../api/client';
-import type { AiModel, Conversation, Message } from '../api/types';
+import {
+  api,
+  describeLocalFileProblem,
+  MAX_FILES_PER_MESSAGE,
+  fetchChatFile,
+  fetchConversationFiles,
+  fetchFileContent,
+  streamChatMessage,
+  reconnectGenerationStream,
+  uploadConversationFile,
+  type StreamHandle,
+} from '../api/client';
+import type { AiModel, ChatFile, ComposerFile, Conversation, Message } from '../api/types';
+import { isImageFile } from '../utils/fileKind';
+import { createUploadQueue } from '../utils/uploadQueue';
 import { useToast } from '../composables/useToast';
 import { useOnline } from '../composables/useOnline';
 
@@ -25,6 +39,46 @@ const models = ref<AiModel[]>([]);
 const selectedModelId = ref('');
 const drawerOpen = ref(false);
 const error = ref('');
+
+/**
+ * File attachments (Day 5-6).
+ *  - `attachments` are files waiting to be sent as context (composer chips).
+ *  - `filesById` is the conversation's file index, which resolves the ids
+ *    stored on historical user messages so a reload still renders them.
+ * Uploading is asynchronous: the response comes back UPLOADING/PROCESSING and
+ * the status is polled until READY/FAILED, while chat stays fully usable.
+ * Transfers run one file at a time, in pick order, and every chip carries its
+ * own upload state (`pending` → `uploading` → `completed`, or `error`).
+ */
+const attachments = ref<ComposerFile[]>([]);
+const filesById = ref<Record<string, ChatFile>>({});
+/** A file queued for upload, captured with the conversation it belongs to. */
+interface QueuedUpload {
+  id: string;
+  file: File;
+  conversationId: string;
+}
+/**
+ * Sequential uploads: one file at a time, in pick order. The queue owns the
+ * ordering and the halt-on-failure rule; this view owns the chip state.
+ */
+const uploadQueue = createUploadQueue<QueuedUpload>((item) => uploadOne(item));
+/** Object URLs for image thumbnails, keyed by file id (local or server). */
+const previews = ref<Record<string, string>>({});
+/** In-flight thumbnail fetches, so a chip never triggers two downloads. */
+const previewFetches = new Map<string, Promise<void>>();
+/** File opened in the viewer modal (null = closed). */
+const viewerFile = ref<ChatFile | null>(null);
+let attachmentPoller: number | null = null;
+
+/**
+ * Text used when the user sends files without writing anything. The backend
+ * requires non-blank content, and an empty prompt would give the model nothing
+ * to act on, so a neutral instruction stands in for the missing draft.
+ */
+function defaultFilePrompt(fileCount: number): string {
+  return fileCount > 1 ? 'این فایل‌ها را بررسی کن.' : 'این فایل را بررسی کن.';
+}
 
 /** Desktop collapse state (ChatGPT-style rail); persisted per machine. */
 const sidebarCollapsed = ref(readCollapsedPreference());
@@ -112,6 +166,11 @@ onMounted(async () => {
   }
 });
 
+onBeforeUnmount(() => {
+  stopAttachmentPolling();
+  releasePreviews();
+});
+
 // Connectivity returned: re-attach any row whose live feed a transport drop
 // severed this session (internet disconnect mid-stream). The generation kept
 // running server-side, so the reconnect stream hands back a snapshot plus the
@@ -167,9 +226,17 @@ async function createConversation(): Promise<Conversation> {
 async function loadMessages() {
   if (!activeId.value) {
     messages.value = [];
+    attachments.value = [];
+    filesById.value = {};
+    releasePreviews();
+    stopAttachmentPolling();
+    uploadQueue.reset();
     return;
   }
   messagesLoading.value = true;
+  // Files are loaded with the conversation so a refresh restores in-flight
+  // processing state (it is persisted server-side, never only in memory).
+  void loadConversationFiles();
   try {
     const result = await api<{ conversation: Conversation; messages: Message[] }>(
       `/conversations/${activeId.value}`,
@@ -198,6 +265,331 @@ function startNewConversation() {
   if (streaming.value) return;
   activeId.value = null;
   messages.value = [];
+  attachments.value = [];
+  viewerFile.value = null;
+  releasePreviews();
+  uploadQueue.reset();
+}
+
+// ---- file attachments ----
+
+/** Indexes the conversation's files and resumes polling for unfinished ones. */
+async function loadConversationFiles() {
+  const conversationId = activeId.value;
+  if (!conversationId) return;
+  try {
+    const files = await fetchConversationFiles(conversationId);
+    if (conversationId !== activeId.value) return; // switched meanwhile
+    indexFiles(files);
+
+    // Restore unfinished uploads as composer chips so the user still sees the
+    // file that was processing when the page was reloaded (status came from
+    // the database, not from memory). READY files were already consumed by
+    // their message and are only used to label those chips.
+    const unfinished = files
+      .filter((file) => file.status !== 'READY' && !attachments.value.some((a) => a.id === file.id))
+      .map((file) => asChip(file));
+    attachments.value = [...attachments.value, ...unfinished];
+    ensureAttachmentPolling();
+  } catch {
+    /* the file index is a convenience — chat still works without it */
+  }
+}
+
+function indexFiles(files: ChatFile[]) {
+  const index = { ...filesById.value };
+  for (const file of files) index[file.id] = file;
+  filesById.value = index;
+}
+
+/** Files attached to a specific user message, resolved for chip rendering. */
+function attachmentsFor(message: Message): ChatFile[] {
+  if (!message.attachedFileIds?.length) return [];
+  return message.attachedFileIds
+    .map((id) => filesById.value[id])
+    .filter((file): file is ChatFile => Boolean(file));
+}
+
+/**
+ * Uploads one or more files chosen in a single picker session. Every accepted
+ * file shows up as a chip (with an image thumbnail) immediately, so the upload
+ * is visible while it runs, and the Send button stays disabled until the last
+ * transfer finishes. Processing afterwards does NOT block chat.
+ */
+async function attachFiles(files: File[]) {
+  error.value = '';
+  if (files.length === 0) return;
+
+  // Obvious rejects never cost an upload; the backend re-validates everything.
+  const valid: File[] = [];
+  for (const file of files) {
+    const problem = describeLocalFileProblem(file);
+    if (problem) toast.error(`«${file.name}»: ${problem}`);
+    else valid.push(file);
+  }
+  if (valid.length === 0) return;
+
+  // Per-message cap, enforced before anything leaves the browser (the backend
+  // rejects an oversized fileIds array anyway, so failing early is clearer).
+  const remaining = MAX_FILES_PER_MESSAGE - attachments.value.length;
+  if (remaining <= 0) {
+    toast.error(`حداکثر ${MAX_FILES_PER_MESSAGE.toLocaleString('fa-IR')} فایل می‌توانید اضافه کنید.`);
+    return;
+  }
+  if (valid.length > remaining) {
+    toast.error(
+      `فقط ${remaining.toLocaleString('fa-IR')} فایل دیگر می‌توانید اضافه کنید.`,
+    );
+    valid.length = remaining;
+  }
+
+  try {
+    if (!activeId.value) await createConversation();
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : 'ساخت گفتگو ناموفق بود.');
+    return;
+  }
+  const conversationId = activeId.value;
+  if (!conversationId) return;
+
+  // Every accepted file becomes a chip straight away (queued, not uploaded
+  // yet) so the user sees the whole batch while the first transfer runs.
+  const chips = valid.map((file) => makePendingAttachment(file, conversationId));
+  chips.forEach((chip, index) => {
+    const file = valid[index];
+    if (isImageFile({ originalName: file.name, mimeType: file.type })) {
+      previews.value = { ...previews.value, [chip.id]: URL.createObjectURL(file) };
+    }
+  });
+  attachments.value = [...attachments.value, ...chips];
+  uploadQueue.enqueue(
+    chips.map((chip) => ({ id: chip.id, file: chip.source as File, conversationId })),
+  );
+}
+
+function makePendingAttachment(file: File, conversationId: string): ComposerFile {
+  const now = new Date().toISOString();
+  return {
+    id: `local-${localId()}`,
+    userId: '',
+    conversationId,
+    originalName: file.name || 'بدون‌نام',
+    mimeType: file.type,
+    size: file.size,
+    // The server record starts as UPLOADING; locally it is still queued.
+    status: 'UPLOADING',
+    upload: 'pending',
+    uploadError: null,
+    errorMessage: null,
+    attempts: 0,
+    // Kept so a failed upload can be retried without re-picking the file.
+    source: file,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+/**
+ * Transfers one queued file and moves its chip to `completed`. Rejecting hands
+ * the failure back to the queue, which stops until the user retries or drops
+ * the chip.
+ */
+async function uploadOne(item: QueuedUpload): Promise<void> {
+  patchAttachment(item.id, { upload: 'uploading', uploadError: null });
+
+  let uploaded: ChatFile;
+  try {
+    uploaded = await uploadConversationFile(item.conversationId, item.file);
+  } catch (e) {
+    patchAttachment(item.id, {
+      upload: 'error',
+      uploadError: e instanceof Error ? e.message : 'آپلود فایل ناموفق بود.',
+    });
+    throw e;
+  }
+
+  // The chip may be gone (removed while uploading) or belong to a conversation
+  // the user has left; either way the upload is not adopted on screen.
+  if (!attachments.value.some((file) => file.id === item.id)) {
+    revokePreview(item.id);
+    return;
+  }
+  if (item.conversationId !== activeId.value) {
+    revokePreview(item.id);
+    return;
+  }
+
+  indexFiles([uploaded]);
+  adoptPreview(item.id, uploaded.id);
+  // The server id replaces the local placeholder. The upload is finished even
+  // though the server may still be processing, so the chip shows its check now.
+  const completed: ComposerFile = { ...uploaded, upload: 'completed' };
+  attachments.value = attachments.value.map((file) => (file.id === item.id ? completed : file));
+  ensureAttachmentPolling();
+}
+
+/** Applies a local state change to one chip, leaving the others untouched. */
+function patchAttachment(id: string, patch: Partial<ComposerFile>) {
+  attachments.value = attachments.value.map((file) =>
+    file.id === id ? { ...file, ...patch } : file,
+  );
+}
+
+/**
+ * Re-queues a chip whose upload failed. The File is still in memory, so the
+ * user never has to pick it again; it goes back to the front, which keeps the
+ * order of the files still waiting for their turn.
+ */
+function retryUpload(fileId: string) {
+  const chip = attachments.value.find((file) => file.id === fileId);
+  if (!chip || chip.upload !== 'error' || !chip.source) return;
+  patchAttachment(fileId, { upload: 'pending', uploadError: null });
+  uploadQueue.retry({ id: fileId, file: chip.source, conversationId: chip.conversationId });
+}
+
+function localId(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
+}
+
+function removeAttachment(fileId: string) {
+  attachments.value = attachments.value.filter((file) => file.id !== fileId);
+  revokePreview(fileId);
+  // Dropping a chip is an explicit decision: when it was the file that halted
+  // the queue, the picks still waiting for their turn may go ahead.
+  uploadQueue.drop(fileId);
+  ensureAttachmentPolling();
+}
+
+/** A server file shown in the composer: its upload has already succeeded. */
+function asChip(file: ChatFile): ComposerFile {
+  return { ...file, upload: 'completed' };
+}
+
+// ---- thumbnails & viewer ----
+
+/** Object URL for a file's thumbnail, when one has been loaded already. */
+function previewFor(fileId: string): string | null {
+  return previews.value[fileId] ?? null;
+}
+
+/** Moves a local placeholder's thumbnail onto the server-assigned file id. */
+function adoptPreview(fromId: string, toId: string) {
+  const current = previews.value[fromId];
+  if (!current) return;
+  const next = { ...previews.value, [toId]: current };
+  delete next[fromId];
+  previews.value = next;
+}
+
+function revokePreview(fileId: string) {
+  const url = previews.value[fileId];
+  if (!url) return;
+  URL.revokeObjectURL(url);
+  const next = { ...previews.value };
+  delete next[fileId];
+  previews.value = next;
+}
+
+function releasePreviews() {
+  for (const url of Object.values(previews.value)) URL.revokeObjectURL(url);
+  previews.value = {};
+  previewFetches.clear();
+}
+
+/**
+ * Lazily fetches a thumbnail for an image that came from the server (sent in an
+ * earlier turn, or uploaded before a refresh). A thumbnail is a nicety: a
+ * failure leaves the static kind icon in place.
+ */
+async function ensureImagePreview(file: ChatFile) {
+  if (file.status !== 'READY' || !isImageFile(file)) return;
+  if (previews.value[file.id] || previewFetches.has(file.id)) return;
+  const task = (async () => {
+    try {
+      const blob = await fetchFileContent(file.id);
+      previews.value = { ...previews.value, [file.id]: URL.createObjectURL(blob) };
+    } catch {
+      /* keep the icon fallback */
+    } finally {
+      previewFetches.delete(file.id);
+    }
+  })();
+  previewFetches.set(file.id, task);
+  await task;
+}
+
+/**
+ * Opens the preview sheet for a file. Only `READY` files have content to show,
+ * so anything else answers with the reason instead of an empty viewer.
+ */
+function openFile(file: ChatFile) {
+  if (file.status !== 'READY') {
+    toast.error(`«${file.originalName}» هنوز آماده نیست.`);
+    return;
+  }
+  viewerFile.value = file;
+  void ensureImagePreview(file);
+}
+
+/** Polls only while something is still being processed. */
+function ensureAttachmentPolling() {
+  // Only files that reached the server are polled; queued ones do not exist in
+  // the database yet (a chip is `completed` the moment its upload returns).
+  const hasUnfinished = attachments.value.some(
+    (file) =>
+      file.upload === 'completed' && (file.status === 'UPLOADING' || file.status === 'PROCESSING'),
+  );
+  if (hasUnfinished && attachmentPoller === null) {
+    attachmentPoller = window.setInterval(() => void refreshAttachments(), 2500);
+  } else if (!hasUnfinished) {
+    stopAttachmentPolling();
+  }
+}
+
+function stopAttachmentPolling() {
+  if (attachmentPoller !== null) window.clearInterval(attachmentPoller);
+  attachmentPoller = null;
+}
+
+/**
+ * Re-reads the status of attached files. A single failed poll (offline blip)
+ * is ignored: the next tick retries, and the state lives in the database.
+ */
+async function refreshAttachments() {
+  const pending = attachments.value.filter(
+    (file) =>
+      file.upload === 'completed' && (file.status === 'UPLOADING' || file.status === 'PROCESSING'),
+  );
+  if (pending.length === 0) {
+    stopAttachmentPolling();
+    return;
+  }
+  const updated = await Promise.all(
+    pending.map(async (file) => {
+      try {
+        return await fetchChatFile(file.id);
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const changed = updated.filter((file): file is ChatFile => Boolean(file));
+  if (changed.length > 0) {
+    indexFiles(changed);
+    // Merged (not replaced) so the local upload state on each chip survives.
+    attachments.value = attachments.value.map((file) => {
+      const latest = changed.find((updatedFile) => updatedFile.id === file.id);
+      return latest ? { ...file, ...latest } : file;
+    });
+    for (const file of changed) {
+      if (file.status === 'FAILED') {
+        toast.error(`پردازش «${file.originalName}» ناموفق بود.`);
+      }
+    }
+  }
+  ensureAttachmentPolling();
 }
 
 // ---- sending / streaming ----
@@ -215,7 +607,7 @@ function newClientMessageId(): string {
 
 async function send(
   content: string,
-  options: { clientMessageId?: string; existingUserRowId?: string } = {},
+  options: { clientMessageId?: string; existingUserRowId?: string; fileIds?: string[] } = {},
 ) {
   if (streaming.value) return;
   error.value = '';
@@ -238,15 +630,29 @@ async function send(
   // A new send supersedes any pending network-recovery attachment.
   networkRecoveryRowId.value = null;
 
+  // Only READY files may be sent as context; anything still processing stays
+  // attached for the next message (the backend re-checks and would 400).
+  const fileIds =
+    options.fileIds ??
+    attachments.value.filter((file) => file.status === 'READY').map((file) => file.id);
+
+  // A file on its own is a complete message — no text required.
+  const messageContent =
+    content.trim() || (fileIds.length > 0 ? defaultFilePrompt(fileIds.length) : '');
+  if (!messageContent) return;
+
   const optimisticUser: Message = {
     id: `local-${clientMessageId}`,
     conversationId,
     role: 'user',
-    content,
+    content: messageContent,
     status: null,
     errorMessage: null,
     modelId: null,
     clientMessageId,
+    // Files used for this turn, so the chips show immediately (the persisted
+    // row returns the same ids via the meta event).
+    attachedFileIds: fileIds.length > 0 ? fileIds : null,
     createdAt: new Date().toISOString(),
   };
   const placeholder: Message = {
@@ -258,6 +664,7 @@ async function send(
     errorMessage: null,
     modelId: null,
     clientMessageId: null,
+    attachedFileIds: null,
     createdAt: new Date().toISOString(),
   };
   // A retry (manual or auto) reuses the user row already on screen — pushing
@@ -279,12 +686,23 @@ async function send(
     streamHandle.value = null;
     activeStreamRowId.value = null;
     inflightClientMessageId.value = null;
+    // Sent files are now part of the message; only unfinished ones stay
+    // attached for the next turn.
+    if (fileIds.length > 0) {
+      attachments.value = attachments.value.filter((file) => file.status !== 'READY');
+      ensureAttachmentPolling();
+    }
     void loadConversations(); // refresh titles and ordering
   };
 
   streamHandle.value = streamChatMessage(
     conversationId,
-    { content, modelId: selectedModelId.value || undefined, clientMessageId },
+    {
+      content: messageContent,
+      modelId: selectedModelId.value || undefined,
+      clientMessageId,
+      fileIds,
+    },
     {
       onMeta: (meta) => {
         const optimistic = messages.value.find((m) => m.id === optimisticUser.id);
@@ -414,9 +832,12 @@ function retry(message: Message) {
   // The user row stays on screen (existingUserRowId suppresses the optimistic
   // duplicate); reusing its clientMessageId makes the backend treat this as a
   // replay — one user row, one fresh assistant row.
+  // The turn's own attachments, not the composer's pending files: retrying a
+  // failed answer must not quietly drop the files it was asked about.
   void send(userRow.content, {
     clientMessageId: userRow.clientMessageId ?? undefined,
     existingUserRowId: userRow.id,
+    fileIds: userRow.attachedFileIds ?? [],
   });
 }
 
@@ -506,7 +927,11 @@ async function scrollToBottom(force = false) {
             :message="message"
             :model-name="models.find((m) => m.id === message.modelId)?.name"
             :retry-disabled="streaming"
+            :attachments="attachmentsFor(message)"
+            :previews="previews"
+            :request-preview="ensureImagePreview"
             @retry="retry"
+            @open-file="openFile"
           />
           <MessageItem
             v-if="streamingMessage"
@@ -521,10 +946,24 @@ async function scrollToBottom(force = false) {
         :models="models"
         :model-id="selectedModelId"
         :streaming="streaming"
+        :attachments="attachments"
+        :previews="previews"
+        :request-preview="ensureImagePreview"
         :hint="activeId ? '' : 'ارسال اولین پیام، گفتگو را به‌صورت خودکار می‌سازد.'"
         @send="send"
         @stop="stopStreaming"
+        @attach="attachFiles"
+        @remove-attachment="removeAttachment"
+        @retry-upload="retryUpload"
+        @open-file="openFile"
         @update:model-id="selectedModelId = $event"
+      />
+
+      <FileViewerModal
+        v-if="viewerFile"
+        :file="viewerFile"
+        :preview-url="previewFor(viewerFile.id)"
+        @close="viewerFile = null"
       />
     </main>
   </div>

@@ -61,12 +61,20 @@ export class MessagesController {
         ? request.headers['idempotency-key']
         : undefined);
 
-    // Validate ownership, model availability, and idempotency BEFORE opening
-    // the SSE stream, so these errors reach the client as normal JSON errors.
-    await this.messagesService.assertChatTurnAllowed(user.id, conversationId, dto.modelId, {
-      clientMessageId,
-      content: dto.content.trim(),
-    });
+    // Validate ownership, model availability, idempotency, and attached-file
+    // readiness BEFORE opening the SSE stream, so these errors reach the
+    // client as normal JSON errors. Attachments are resolved here and reused
+    // for this turn's prompt (files are read exactly once).
+    const attachments = await this.messagesService.assertChatTurnAllowed(
+      user.id,
+      conversationId,
+      dto.modelId,
+      {
+        clientMessageId,
+        content: dto.content.trim(),
+      },
+      dto.fileIds,
+    );
 
     // Nest defaults POST to 201; an SSE stream is a normal 200 response.
     response.status(HttpStatus.OK);
@@ -82,6 +90,7 @@ export class MessagesController {
       dto.content.trim(),
       dto.modelId,
       clientMessageId,
+      attachments,
     );
 
     // Disconnect signal: 'close' fires on both premature disconnects and our
@@ -212,6 +221,7 @@ export class MessagesController {
     errorMessage: string | null;
     modelId: string | null;
     clientMessageId: string | null;
+    attachedFileIds: string[] | null;
     createdAt: Date;
   }) {
     return {
@@ -227,6 +237,9 @@ export class MessagesController {
       // Idempotency token echoed back; frontend can correlate retries with
       // the original user intent and link Retry buttons to the right turn.
       clientMessageId: message.clientMessageId,
+      // Files attached to this user turn (ids only) — the client renders chips
+      // from these, so a reload shows the attachment without extra calls.
+      attachedFileIds: message.attachedFileIds ?? null,
       createdAt: message.createdAt,
     };
   }
