@@ -100,28 +100,11 @@ watch(sidebarCollapsed, (value) => {
   }
 });
 
-/** Opt-in web search for the next turn; persisted per machine. */
+/** Opt-in web search for the next turn; always starts off. */
 type SearchStatus = { phase: 'searching' | 'succeeded'; resultCount: number } | null;
-const WEB_SEARCH_KEY = 'hooshyar.web-search';
-const webSearchEnabled = ref(readWebSearchPreference());
+const webSearchEnabled = ref(false);
 /** Live search progress of the in-flight turn (null when idle). */
 const searchStatus = ref<SearchStatus>(null);
-
-function readWebSearchPreference(): boolean {
-  try {
-    return localStorage.getItem(WEB_SEARCH_KEY) === 'true';
-  } catch {
-    return false;
-  }
-}
-
-watch(webSearchEnabled, (value) => {
-  try {
-    localStorage.setItem(WEB_SEARCH_KEY, String(value));
-  } catch {
-    /* private mode — keep state in memory only */
-  }
-});
 
 /** Last-opened conversation id; restored on refresh so the user lands back where they were. */
 const ACTIVE_CONV_KEY = 'hooshyar.active-conversation';
@@ -246,6 +229,7 @@ async function selectConversation(id: string) {
   activeId.value = id;
   error.value = '';
   pinnedToBottom.value = true;
+  webSearchEnabled.value = false;
   await loadMessages();
 }
 
@@ -306,6 +290,7 @@ function startNewConversation() {
   attachments.value = [];
   viewerFile.value = null;
   pinnedToBottom.value = true;
+  webSearchEnabled.value = false;
   releasePreviews();
   uploadQueue.reset();
 }

@@ -48,20 +48,20 @@ const safeSources = computed(() =>
 <style scoped>
 .sources {
   display: grid;
-  gap: 0.45rem;
-  margin-top: 0.6rem;
+  gap: 0.3rem;
+  margin-top: 0.5rem;
 }
 
 .sources__title {
   margin: 0;
-  font-size: 0.78rem;
+  font-size: 0.7rem;
   font-weight: 600;
   color: var(--text-2);
 }
 
 .sources__list {
   display: grid;
-  gap: 0.4rem;
+  gap: 0.25rem;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -70,8 +70,8 @@ const safeSources = computed(() =>
 .sources__card {
   display: flex;
   align-items: center;
-  gap: 0.55rem;
-  padding: 0.5rem 0.65rem;
+  gap: 0.45rem;
+  padding: 0.35rem 0.55rem;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -90,10 +90,10 @@ const safeSources = computed(() =>
 .sources__index {
   display: grid;
   place-items: center;
-  width: 1.4rem;
-  height: 1.4rem;
+  width: 1.15rem;
+  height: 1.15rem;
   flex-shrink: 0;
-  font-size: 0.7rem;
+  font-size: 0.62rem;
   font-weight: 600;
   color: var(--text-on-accent-soft);
   background: var(--accent-soft);
@@ -112,7 +112,7 @@ const safeSources = computed(() =>
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.82rem;
+  font-size: 0.74rem;
   font-weight: 500;
   color: var(--text-1);
 }
@@ -121,7 +121,7 @@ const safeSources = computed(() =>
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.7rem;
+  font-size: 0.62rem;
   color: var(--text-3);
 }
 
