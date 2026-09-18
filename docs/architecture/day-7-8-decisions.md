@@ -10,6 +10,18 @@
 > (after Stage 17 / the Day 5–6 merge). Everything marked **[Proposed]** is what
 > Day 7–8 adds. Nothing here is implemented yet.
 
+> **Implementation status (2026-09-18, Stage 18):** the provider/model core of
+> §5, §6 (capabilities only) and §22.3/§22.4/§22.7 has landed on
+> `feature/MS-MultiModel-AIProviderManagement` — adapters (`mock`,
+> `openai-compatible`, `anthropic`, `google`), the `ProviderEvent` /
+> `ProviderError` contracts and `ai_models.capabilities`. One refinement to
+> §5: the per-request timeout lives in a shared helper
+> (`requestSignalWithTimeout`) consumed by each adapter — it honors the
+> orchestrator's `AbortSignal` per §22.3 while keeping the historical budget
+> semantics (covers request establishment, not the whole stream). §7
+> usage/quota, §8 plans, §9 search, §12 fallback and the pricing/fallback
+> columns remain **unimplemented** (their work packages are still open).
+
 ---
 
 ## 1. Purpose
@@ -962,5 +974,8 @@ same PR (existing convention). This file is amended only by mutual agreement.
 ---
 
 *Prepared from the repository state at commit `35b30cc` (merge of
-`origin/feature/file-processing` into `develop`). Validate references against
-the tree when implementing; report drift by amending this file.*
+`origin/feature/file-processing` into `develop`) and re-validated after
+`68cd1fc` (merge of `fixbug/backend` — frontend-only: ChatView mid-stream
+detach on conversation switch; no backend contracts changed). Validate
+references against the tree when implementing; report drift by amending this
+file.*

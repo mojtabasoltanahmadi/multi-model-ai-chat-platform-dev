@@ -1,11 +1,15 @@
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsIn,
   IsOptional,
   IsString,
   MaxLength,
 } from 'class-validator';
+import { AI_PROVIDER_KINDS } from './create-model.dto';
 import { AiProviderKind } from '../ai-model.entity';
+import { MODEL_CAPABILITIES } from '../model-capabilities';
 
 /** Partial update; unknown fields are stripped by the global ValidationPipe. */
 export class UpdateModelDto {
@@ -15,7 +19,7 @@ export class UpdateModelDto {
   name?: string;
 
   @IsOptional()
-  @IsIn(['mock', 'openai-compatible'])
+  @IsIn(AI_PROVIDER_KINDS)
   provider?: AiProviderKind;
 
   @IsOptional()
@@ -32,6 +36,15 @@ export class UpdateModelDto {
   @IsString()
   @MaxLength(500)
   apiKey?: string;
+
+  @IsOptional()
+  @IsArray({ message: 'قابلیت‌ها باید آرایه باشند.' })
+  @ArrayMaxSize(MODEL_CAPABILITIES.length, { message: 'قابلیت‌های بیش از حد مجاز.' })
+  @IsIn(MODEL_CAPABILITIES as unknown as string[], {
+    each: true,
+    message: 'قابلیت واردشده معتبر نیست.',
+  })
+  capabilities?: string[];
 
   @IsOptional()
   @IsBoolean()

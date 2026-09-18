@@ -4,13 +4,22 @@ import {
   Entity,
   PrimaryGeneratedColumn,
 } from 'typeorm';
+import { ModelCapability } from './model-capabilities';
 
 /**
- * Supported provider kinds. The MVP ships two adapters:
+ * Supported provider kinds — one entry per registered adapter
+ * (`backend/src/ai/adapters/`):
  * - mock: streams a canned response (demo & tests, no external dependency)
  * - openai-compatible: any OpenAI-compatible /chat/completions streaming API
+ * - anthropic: Claude via the native Messages API
+ * - google: Gemini via `streamGenerateContent`
+ * Adding a kind = new adapter class + this union + the DTO `IsIn` lists.
  */
-export type AiProviderKind = 'mock' | 'openai-compatible';
+export type AiProviderKind =
+  | 'mock'
+  | 'openai-compatible'
+  | 'anthropic'
+  | 'google';
 
 @Entity('ai_models')
 export class AiModel {
@@ -27,7 +36,10 @@ export class AiModel {
   @Column({ name: 'external_model_id', type: 'varchar', length: 200 })
   externalModelId: string;
 
-  /** Optional OpenAI-compatible base URL, e.g. https://api.openai.com/v1 */
+  /**
+   * Optional API base URL override; each adapter falls back to its provider's
+   * default endpoint when null.
+   */
   @Column({ name: 'base_url', type: 'varchar', length: 500, nullable: true })
   baseUrl: string | null;
 
@@ -48,6 +60,14 @@ export class AiModel {
 
   @Column({ name: 'is_default', type: 'boolean', default: false })
   isDefault: boolean;
+
+  /**
+   * Declared capabilities from the closed set `MODEL_CAPABILITIES`
+   * (jsonb, validated at the admin boundary — no DB constraint). Capabilities
+   * only *unlock* opt-in features for a model; they never gate the base turn.
+   */
+  @Column({ type: 'jsonb', default: '[]' })
+  capabilities: ModelCapability[];
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

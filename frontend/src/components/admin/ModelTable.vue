@@ -24,6 +24,8 @@ defineEmits<{
 const providerLabel: Record<AiModel['provider'], string> = {
   mock: 'ماک',
   'openai-compatible': 'سازگار با OpenAI',
+  anthropic: 'Anthropic (Claude)',
+  google: 'Google Gemini',
 };
 </script>
 

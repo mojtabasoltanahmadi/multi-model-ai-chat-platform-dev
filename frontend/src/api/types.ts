@@ -127,7 +127,26 @@ export interface AdminFileStatsResponse {
   queue: { waiting: number; active: number; failed: number; completed: number } | null;
 }
 
-export type AiProviderKind = 'mock' | 'openai-compatible';
+/**
+ * Provider kinds — mirrors the backend `AiProviderKind` and its registered
+ * adapters (see backend/src/ai/adapters/). Adding a kind is a backend change
+ * first; this union, the provider labels and ProviderMark follow it.
+ */
+export type AiProviderKind = 'mock' | 'openai-compatible' | 'anthropic' | 'google';
+
+/**
+ * Closed capability set declared per model (mirrors backend
+ * MODEL_CAPABILITIES). Capabilities unlock opt-in features; they are metadata
+ * for the picker until the matching feature ships.
+ */
+export const MODEL_CAPABILITIES = ['web-search', 'reasoning'] as const;
+export type ModelCapability = (typeof MODEL_CAPABILITIES)[number];
+
+/** Persian labels for capability chips (picker + admin panel). */
+export const MODEL_CAPABILITY_LABELS: Record<ModelCapability, string> = {
+  'web-search': 'جستجوی وب',
+  reasoning: 'استدلال',
+};
 
 /** Model as returned by the API — the provider API key is never included. */
 export interface AiModel {
@@ -140,6 +159,8 @@ export interface AiModel {
   /** Available to users on the FREE plan (independent of isActive). */
   isFree: boolean;
   isDefault: boolean;
+  /** Declared capabilities from the closed set; empty list by default. */
+  capabilities: ModelCapability[];
   createdAt: string;
   hasApiKey: boolean;
 }
@@ -170,6 +191,7 @@ export interface CreateModelPayload {
   externalModelId: string;
   baseUrl?: string;
   apiKey?: string;
+  capabilities?: ModelCapability[];
   isActive?: boolean;
   isFree?: boolean;
 }
@@ -180,6 +202,7 @@ export interface UpdateModelPayload {
   externalModelId?: string;
   baseUrl?: string | null;
   apiKey?: string;
+  capabilities?: ModelCapability[];
   isActive?: boolean;
   isFree?: boolean;
 }

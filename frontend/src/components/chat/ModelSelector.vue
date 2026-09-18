@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import ProviderMark from '../ui/ProviderMark.vue';
-import type { AiModel } from '../../api/types';
+import {
+  MODEL_CAPABILITY_LABELS,
+  type AiModel,
+  type ModelCapability,
+} from '../../api/types';
 
 interface Props {
   models: AiModel[];
@@ -24,11 +28,27 @@ const selected = computed(
 const providerLabel: Record<AiModel['provider'], string> = {
   mock: 'ماک آزمایشی',
   'openai-compatible': 'سازگار با OpenAI',
+  anthropic: 'Anthropic (Claude)',
+  google: 'Google Gemini',
+};
+
+/** Capability → small inline glyph path (closed set, mirrors the backend). */
+const capabilityGlyph: Record<ModelCapability, string> = {
+  // magnifier — web search
+  'web-search':
+    'M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM15.5 15.5 21 21',
+  // four-point spark — reasoning
+  reasoning:
+    'M12 4c.7 3.4 3.6 6.3 7 7-3.4.7-6.3 3.6-7 7-.7-3.4-3.6-6.3-7-7 3.4-.7 6.3-3.6 7-7Z',
 };
 
 function choose(model: AiModel) {
   open.value = false;
   emit('select', model.id);
+}
+
+function capabilityLabel(capability: ModelCapability): string {
+  return MODEL_CAPABILITY_LABELS[capability];
 }
 
 function onDocumentClick(event: MouseEvent) {
@@ -104,7 +124,31 @@ onBeforeUnmount(() => {
                 {{ model.name }}
                 <span v-if="model.isDefault" class="model-selector__default">پیش‌فرض</span>
               </span>
-              <span class="model-selector__option-provider">{{ providerLabel[model.provider] }}</span>
+              <span class="model-selector__option-meta">
+                <span class="model-selector__option-provider">{{ providerLabel[model.provider] }}</span>
+                <span
+                  v-for="capability in model.capabilities"
+                  :key="capability"
+                  class="model-selector__option-cap"
+                  role="img"
+                  :aria-label="capabilityLabel(capability)"
+                  :title="capabilityLabel(capability)"
+                >
+                  <svg
+                    width="11"
+                    height="11"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path :d="capabilityGlyph[capability]" />
+                  </svg>
+                </span>
+              </span>
             </span>
             <svg
               v-if="model.id === selected?.id"
@@ -250,8 +294,21 @@ onBeforeUnmount(() => {
   color: var(--text-on-accent-soft);
 }
 
+.model-selector__option-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
 .model-selector__option-provider {
   font-size: 0.7rem;
+  color: var(--text-3);
+}
+
+.model-selector__option-cap {
+  display: inline-flex;
+  align-items: center;
   color: var(--text-3);
 }
 

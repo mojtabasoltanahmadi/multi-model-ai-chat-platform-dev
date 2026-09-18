@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, Injectable, NotFoundException 
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, In, Repository } from 'typeorm';
 import { AiModel } from './ai-model.entity';
+import { normalizeCapabilities } from './model-capabilities';
 import { CreateModelDto } from './dto/create-model.dto';
 import { UpdateModelDto } from './dto/update-model.dto';
 
@@ -49,6 +50,7 @@ export class ModelsService {
       externalModelId: dto.externalModelId.trim(),
       baseUrl: dto.baseUrl?.trim() || null,
       apiKey: dto.apiKey?.trim() || null,
+      capabilities: normalizeCapabilities(dto.capabilities),
       isActive: willBeActive,
       isFree: willBeFree,
       isDefault: false,
@@ -86,6 +88,7 @@ export class ModelsService {
     if (dto.externalModelId !== undefined) model.externalModelId = dto.externalModelId.trim();
     if (dto.baseUrl !== undefined) model.baseUrl = dto.baseUrl?.trim() || null;
     if (dto.apiKey !== undefined) model.apiKey = dto.apiKey.trim() || null;
+    if (dto.capabilities !== undefined) model.capabilities = normalizeCapabilities(dto.capabilities);
     if (dto.isActive !== undefined) model.isActive = dto.isActive;
     if (dto.isFree !== undefined) model.isFree = dto.isFree;
 

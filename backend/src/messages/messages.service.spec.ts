@@ -2,9 +2,14 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { GenerationRegistry } from './generation.registry';
 import { MessagesService, ChatStreamEvent, ChatTurnHandle } from './messages.service';
 import { AttachedFileContext } from '../files/files.service';
+import { ProviderEvent } from '../ai/provider-adapter';
+import { ProviderError } from '../ai/provider-errors';
 import { createMockRepository } from '../test/mocks';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Provider adapters now yield normalized events — helper keeps the specs readable. */
+const text = (value: string): ProviderEvent => ({ type: 'text', text: value });
 
 describe('MessagesService — chat turn lifecycle', () => {
   let service: MessagesService;
@@ -106,8 +111,8 @@ describe('MessagesService — chat turn lifecycle', () => {
   it('pre-persists an assistant row with status=pending BEFORE any chunk', async () => {
     setup();
     aiProviderService.streamChat.mockImplementation(async function* () {
-      yield 'سلام ';
-      yield 'دنیا';
+      yield text('سلام ');
+      yield text('دنیا');
     });
 
     const { handle, done } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
@@ -135,8 +140,8 @@ describe('MessagesService — chat turn lifecycle', () => {
   it('persists exactly ONE distinct assistant row with completed status on success', async () => {
     setup();
     aiProviderService.streamChat.mockImplementation(async function* () {
-      yield 'سلام ';
-      yield 'دنیا';
+      yield text('سلام ');
+      yield text('دنیا');
     });
 
     const { done } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
@@ -155,7 +160,7 @@ describe('MessagesService — chat turn lifecycle', () => {
   it('persists ONE failed row and a generic client message on AI failure', async () => {
     setup();
     aiProviderService.streamChat.mockImplementation(async function* () {
-      yield 'پاسخ ناتمام';
+      yield text('پاسخ ناتمام');
       throw new Error('ECONNREFUSED 10.0.0.9:443 (internal detail)');
     });
 
@@ -179,7 +184,7 @@ describe('MessagesService — chat turn lifecycle', () => {
     aiProviderService.streamChat.mockImplementation(async function* () {
       for (const chunk of chunks) {
         await sleep(10);
-        yield chunk;
+        yield text(chunk);
       }
     });
 
@@ -203,7 +208,7 @@ describe('MessagesService — chat turn lifecycle', () => {
     setup();
     aiProviderService.streamChat.mockImplementation(async function* () {
       await sleep(20);
-      yield 'تنها بخش پاسخ';
+      yield text('تنها بخش پاسخ');
     });
 
     const { handle } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
@@ -217,13 +222,11 @@ describe('MessagesService — chat turn lifecycle', () => {
     expect(finalRow.content).toBe('تنها بخش پاسخ');
   });
 
-  it('marks the row failed (not interrupted) on provider timeout even with no subscribers', async () => {
+  it('marks the row failed (not interrupted) on a normalized provider timeout even with no subscribers', async () => {
     setup();
     aiProviderService.streamChat.mockImplementation(async function* () {
-      yield 'قدیم ';
-      const abort = new Error('The operation was aborted');
-      abort.name = 'AbortError';
-      throw abort;
+      yield text('قدیم ');
+      throw new ProviderError('timeout', null, 'AI request for model Mock timed out.');
     });
 
     const { handle } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
@@ -232,13 +235,29 @@ describe('MessagesService — chat turn lifecycle', () => {
     expect(finalRow.errorMessage).toContain('timed out');
   });
 
+  it('still maps a bare AbortError to the timeout client message (defense in depth)', async () => {
+    setup();
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      const abort = new Error('The operation was aborted');
+      abort.name = 'AbortError';
+      throw abort;
+    });
+
+    const { handle, done } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
+    const events = await done;
+    const finalRow = await handle.completion;
+    expect(finalRow.status).toBe('failed');
+    const terminal = events.at(-1) as Extract<ChatStreamEvent, { type: 'failed' }>;
+    expect(terminal.clientMessage).toContain('بیش از حد طول کشید');
+  });
+
   it('persists incremental progress while streaming (throttled, not per token)', async () => {
     setup({ persistIntervalMs: 5 });
     const chunks = ['یک ', 'دو ', 'سه ', 'چهار ', 'پنج'];
     aiProviderService.streamChat.mockImplementation(async function* () {
       for (const chunk of chunks) {
         await sleep(20); // long enough that the 5ms interval elapses repeatedly
-        yield chunk;
+        yield text(chunk);
       }
     });
 
@@ -284,8 +303,8 @@ describe('MessagesService — chat turn lifecycle', () => {
   it('flips the assistant row to streaming (persisted) on the first delta', async () => {
     setup();
     aiProviderService.streamChat.mockImplementation(async function* () {
-      yield 'اول';
-      yield 'دوم';
+      yield text('اول');
+      yield text('دوم');
     });
 
     await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
@@ -297,7 +316,7 @@ describe('MessagesService — chat turn lifecycle', () => {
   it('names the conversation after its first message', async () => {
     setup({ title: 'گفتگوی جدید' });
     aiProviderService.streamChat.mockImplementation(async function* () {
-      yield 'ok';
+      yield text('ok');
     });
 
     await begin('user-1', 'conv-1', 'یک پیام نسبتاً طولانی به عنوان اولین پیام', undefined, undefined);
@@ -311,7 +330,7 @@ describe('MessagesService — chat turn lifecycle', () => {
   it('does not rename a conversation that already has a custom title', async () => {
     setup({ title: 'عنوان دلخواه' });
     aiProviderService.streamChat.mockImplementation(async function* () {
-      yield 'ok';
+      yield text('ok');
     });
 
     await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
@@ -324,7 +343,7 @@ describe('MessagesService — chat turn lifecycle', () => {
       existingUserByClientMid: { id: 'cmid-1', content: 'سلام' },
     });
     aiProviderService.streamChat.mockImplementation(async function* () {
-      yield 'ok';
+      yield text('ok');
     });
 
     const { done } = await begin('user-1', 'conv-1', 'سلام', undefined, 'cmid-1');
@@ -339,7 +358,7 @@ describe('MessagesService — chat turn lifecycle', () => {
       history: [{ role: 'user', content: 'اول' }, { role: 'assistant', content: 'پاسخ اول' }],
     });
     aiProviderService.streamChat.mockImplementation(async function* () {
-      yield 'پاسخ دوم';
+      yield text('پاسخ دوم');
     });
     modelsService.resolveChatModel.mockResolvedValue({
       id: 'model-2',
@@ -362,7 +381,7 @@ describe('MessagesService — chat turn lifecycle', () => {
       ],
     });
     aiProviderService.streamChat.mockImplementation(async function* () {
-      yield 'ok';
+      yield text('ok');
     });
 
     await begin('user-1', 'conv-1', 'جدید', undefined, undefined);
@@ -378,7 +397,7 @@ describe('MessagesService — chat turn lifecycle', () => {
   it('reuses an existing user row when clientMessageId matches (no duplicate)', async () => {
     setup({ existingUserByClientMid: { id: 'cmid-1', content: 'سلام' } });
     aiProviderService.streamChat.mockImplementation(async function* () {
-      yield 'ok';
+      yield text('ok');
     });
 
     const { handle, done } = await begin('user-1', 'conv-1', 'سلام', undefined, 'cmid-1');
@@ -403,7 +422,7 @@ describe('MessagesService — chat turn lifecycle', () => {
   it('creates a fresh user row when clientMessageId does not match anything', async () => {
     setup();
     aiProviderService.streamChat.mockImplementation(async function* () {
-      yield 'ok';
+      yield text('ok');
     });
 
     const { handle, done } = await begin('user-1', 'conv-1', 'سلام', undefined, 'brand-new');
@@ -470,7 +489,7 @@ describe('MessagesService — chat turn lifecycle', () => {
       ],
     });
     aiProviderService.streamChat.mockImplementation(async function* () {
-      yield 'ok';
+      yield text('ok');
     });
 
     const attachments = await service.assertChatTurnAllowed(
@@ -503,7 +522,7 @@ describe('MessagesService — chat turn lifecycle', () => {
   it('records null attachments and an unchanged prompt for a plain turn', async () => {
     setup();
     aiProviderService.streamChat.mockImplementation(async function* () {
-      yield 'ok';
+      yield text('ok');
     });
 
     const { handle, done } = await begin('user-1', 'conv-1', 'پیام ساده', undefined, undefined);
@@ -526,7 +545,7 @@ describe('MessagesService — chat turn lifecycle', () => {
       ],
     });
     aiProviderService.streamChat.mockImplementation(async function* () {
-      yield 'ok';
+      yield text('ok');
     });
 
     const attachments = await service.assertChatTurnAllowed(
@@ -645,7 +664,7 @@ describe('MessagesService — reconnect / recovery', () => {
     aiProviderService.streamChat.mockImplementation(async function* () {
       for (const chunk of chunks) {
         await sleep(25);
-        yield chunk;
+        yield text(chunk);
       }
     });
 

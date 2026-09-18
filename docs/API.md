@@ -205,13 +205,27 @@ Upload limits and lifecycle: [FILES.md](FILES.md).
 
 ## Admin models (`role=admin` only)
 
+Provider kinds (one registered adapter each, `backend/src/ai/adapters/`):
+`mock` (canned demo stream, no key) · `openai-compatible` (any OpenAI-style
+streaming `/chat/completions`) · `anthropic` (Claude Messages API) ·
+`google` (Gemini `streamGenerateContent`). Model rows additionally carry
+`capabilities` — a closed set (`web-search`, `reasoning`) validated at this
+boundary and surfaced in every model response (picker glyphs, admin panel).
+
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/admin/models` | all models; `apiKey` never returned, `hasApiKey` instead |
-| POST | `/admin/models` | `{ name, provider: 'mock'\|'openai-compatible', externalModelId, baseUrl?, apiKey?, isActive?, isFree? }`; the first active+free model auto-becomes default |
-| PATCH | `/admin/models/:modelId` | partial update (incl. `isFree`); deactivating the default is refused (400); removing free access from the default is refused (400) |
+| POST | `/admin/models` | `{ name, provider: 'mock'\|'openai-compatible'\|'anthropic'\|'google', externalModelId, baseUrl?, apiKey?, capabilities?, isActive?, isFree? }`; the first active+free model auto-becomes default |
+| PATCH | `/admin/models/:modelId` | partial update (incl. `isFree`, `capabilities`); deactivating the default is refused (400); removing free access from the default is refused (400) |
 | POST | `/admin/models/:modelId/default` | transactional swap; exactly one default; inactive or non-free models refused (400) |
 | DELETE | `/admin/models/:modelId` | default model deletion refused (400) |
+
+Provider failure behavior (all adapters): failures are normalized to a closed
+kind set (`timeout`, `rate-limit`, `unavailable`, `auth`, `invalid-request`,
+`invalid-config`, `unknown`). A turn whose provider fails is persisted as a
+`failed` message with the two existing safe Persian sentences (timeout vs
+generic); internal detail stays in server logs. A missing API key fails fast
+as `invalid-config` (never retried, no mid-stream surprise).
 
 ## Error semantics
 

@@ -101,6 +101,7 @@ async function submitPanel(values: PanelFormValues) {
         externalModelId: values.externalModelId,
         baseUrl: values.baseUrl || undefined,
         apiKey: values.apiKey || undefined,
+        capabilities: values.capabilities,
         isActive: values.isActive,
         isFree: values.isFree,
       };
@@ -115,6 +116,7 @@ async function submitPanel(values: PanelFormValues) {
         externalModelId: values.externalModelId,
         baseUrl: values.baseUrl || null,
         ...(values.apiKey ? { apiKey: values.apiKey } : {}),
+        capabilities: values.capabilities,
         isActive: values.isActive,
         isFree: values.isFree,
       };

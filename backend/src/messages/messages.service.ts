@@ -6,6 +6,7 @@ import { Message, MessageStatus } from './message.entity';
 import { ConversationsService } from '../conversations/conversations.service';
 import { ModelsService } from '../models/models.service';
 import { AiProviderService } from '../ai/ai-provider.service';
+import { ProviderError } from '../ai/provider-errors';
 import { GenerationRegistry, GenerationEvent } from './generation.registry';
 import { AiModel } from '../models/ai-model.entity';
 import { FilesService, AttachedFileContext } from '../files/files.service';
@@ -341,15 +342,24 @@ export class MessagesService {
     };
 
     try {
-      for await (const delta of this.aiProviderService.streamChat(history, model)) {
-        assistantMessage.content += delta;
-        if (!streamingFlipped) {
-          assistantMessage.status = 'streaming';
-          streamingFlipped = true;
-          await persistProgress(true);
+      for await (const event of this.aiProviderService.streamChat(history, model)) {
+        if (event.type === 'text') {
+          assistantMessage.content += event.text;
+          if (!streamingFlipped) {
+            assistantMessage.status = 'streaming';
+            streamingFlipped = true;
+            await persistProgress(true);
+          }
+          this.generationRegistry.publishDelta(messageId, event.text);
+          await persistProgress(false);
+        } else if (event.type === 'usage') {
+          // Token accounting is logged for now; the usage_records lifecycle
+          // is a later work package (day-7-8 contract §7).
+          this.logger.log(
+            `ProviderUsage messageId=${messageId} inTok=${event.inputTokens} outTok=${event.outputTokens}`,
+          );
         }
-        this.generationRegistry.publishDelta(messageId, delta);
-        await persistProgress(false);
+        // `status` events (execution phases) have no consumer yet — ignored.
       }
 
       assistantMessage.status = 'completed';
@@ -358,19 +368,19 @@ export class MessagesService {
       completionResolve(saved);
     } catch (error) {
       // Disconnect never lands here — it only unsubscribes. This is a real
-      // AI/provider/DB failure.
-      const isAbort = error instanceof Error && error.name === 'AbortError';
+      // AI/provider/DB failure, normalized to a ProviderError kind by the
+      // adapter layer; branch on the kind only (never message text).
+      const isTimeout =
+        (error instanceof ProviderError && error.kind === 'timeout') ||
+        (error instanceof Error && error.name === 'AbortError');
       this.logger.error(
         `AI generation failed for message ${messageId}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
       assistantMessage.status = 'failed';
-      assistantMessage.errorMessage = isAbort
-        ? 'AI request timed out.'
-        : error instanceof Error
-          ? error.message
-          : String(error);
+      assistantMessage.errorMessage =
+        error instanceof Error ? error.message : String(error);
       let saved = assistantMessage;
       try {
         saved = await this.messagesRepository.save(assistantMessage);
@@ -382,7 +392,7 @@ export class MessagesService {
       this.generationRegistry.publishFailed(
         messageId,
         saved,
-        isAbort
+        isTimeout
           ? 'پاسخ هوش مصنوعی بیش از حد طول کشید. لطفاً دوباره تلاش کنید.'
           : 'سرویس هوش مصنوعی موقتاً در دسترس نیست. لطفاً دوباره تلاش کنید.',
       );

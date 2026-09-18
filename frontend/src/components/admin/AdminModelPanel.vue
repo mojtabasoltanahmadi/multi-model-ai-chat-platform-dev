@@ -1,5 +1,5 @@
 <script lang="ts">
-import type { AiProviderKind } from '../../api/types';
+import type { AiProviderKind, ModelCapability } from '../../api/types';
 
 /** Raw form values; the view turns them into POST/PATCH payloads. */
 export interface PanelFormValues {
@@ -8,20 +8,25 @@ export interface PanelFormValues {
   externalModelId: string;
   baseUrl: string;
   apiKey: string;
+  capabilities: ModelCapability[];
   isActive: boolean;
   isFree: boolean;
 }
 </script>
 
 <script setup lang="ts">
-import { reactive, ref, watch } from 'vue';
+import { computed, reactive, ref, watch } from 'vue';
 import AppDrawer from '../ui/AppDrawer.vue';
 import AppInput from '../ui/AppInput.vue';
 import AppButton from '../ui/AppButton.vue';
 import AppSwitch from '../ui/AppSwitch.vue';
 import ProviderMark from '../ui/ProviderMark.vue';
 import { formatFullDate } from '../../utils/format';
-import type { AiModel } from '../../api/types';
+import {
+  MODEL_CAPABILITIES,
+  MODEL_CAPABILITY_LABELS,
+  type AiModel,
+} from '../../api/types';
 
 interface Props {
   /** null → create mode; otherwise edit this model. */
@@ -36,15 +41,44 @@ const emit = defineEmits<{
   setDefault: [model: AiModel];
 }>();
 
+/** One entry per registered provider kind (mirrors the backend adapters). */
+const providerOptions: { value: AiProviderKind; title: string; subtitle: string }[] = [
+  { value: 'mock', title: 'ماک', subtitle: 'آزمایشی، بدون کلید' },
+  { value: 'openai-compatible', title: 'سازگار با OpenAI', subtitle: 'OpenAI و سرویس‌های مشابه' },
+  { value: 'anthropic', title: 'Anthropic', subtitle: 'مدل‌های Claude' },
+  { value: 'google', title: 'Google Gemini', subtitle: 'مدل‌های Gemini' },
+];
+
+/** Per-provider examples so the form stays self-explanatory. */
+const providerPlaceholders: Record<AiProviderKind, { modelId: string; baseUrl: string }> = {
+  mock: { modelId: 'mock-model', baseUrl: '' },
+  'openai-compatible': { modelId: 'gpt-4o-mini', baseUrl: 'https://api.openai.com/v1' },
+  anthropic: { modelId: 'claude-3-5-sonnet-latest', baseUrl: 'https://api.anthropic.com/v1' },
+  google: {
+    modelId: 'gemini-1.5-flash',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+  },
+};
+
+const apiKeyLabels: Record<AiProviderKind, string> = {
+  mock: 'کلید API (اختیاری برای ماک)',
+  'openai-compatible': 'کلید API',
+  anthropic: 'کلید API (الزامی برای Anthropic)',
+  google: 'کلید API (الزامی برای Gemini)',
+};
+
 const values = reactive<PanelFormValues>({
   name: '',
   provider: 'mock',
   externalModelId: '',
   baseUrl: '',
   apiKey: '',
+  capabilities: [],
   isActive: true,
   isFree: true,
 });
+
+const placeholders = computed(() => providerPlaceholders[values.provider]);
 
 const validation = ref({ name: '', externalModelId: '' });
 const copied = ref(false);
@@ -57,12 +91,19 @@ function init(from: AiModel | null) {
   // The stored key never reaches the client — the field starts empty and
   // only a typed value is submitted (view handles the "keep existing" case).
   values.apiKey = '';
+  values.capabilities = from?.capabilities ? [...from.capabilities] : [];
   values.isActive = from?.isActive ?? true;
   values.isFree = from?.isFree ?? true;
   validation.value = { name: '', externalModelId: '' };
 }
 
 watch(() => props.model, init, { immediate: true });
+
+function toggleCapability(capability: ModelCapability) {
+  values.capabilities = values.capabilities.includes(capability)
+    ? values.capabilities.filter((value) => value !== capability)
+    : [...values.capabilities, capability];
+}
 
 function validate(): boolean {
   validation.value = {
@@ -80,6 +121,7 @@ function submit() {
     externalModelId: values.externalModelId.trim(),
     baseUrl: values.baseUrl.trim(),
     apiKey: values.apiKey.trim(),
+    capabilities: values.capabilities,
     isActive: values.isActive,
     isFree: values.isFree,
   });
@@ -131,31 +173,19 @@ async function copyId() {
         <span class="panel-form__label">نوع ارائه‌دهنده</span>
         <div class="panel-form__providers" role="radiogroup" aria-label="نوع ارائه‌دهنده">
           <button
+            v-for="option in providerOptions"
+            :key="option.value"
             type="button"
             role="radio"
             class="panel-form__provider"
-            :aria-checked="values.provider === 'mock'"
-            :class="{ 'panel-form__provider--active': values.provider === 'mock' }"
-            @click="values.provider = 'mock'"
+            :aria-checked="values.provider === option.value"
+            :class="{ 'panel-form__provider--active': values.provider === option.value }"
+            @click="values.provider = option.value"
           >
-            <ProviderMark provider="mock" :size="24" />
+            <ProviderMark :provider="option.value" :size="24" />
             <span class="panel-form__provider-text">
-              <strong>ماک</strong>
-              <span>آزمایشی، بدون کلید</span>
-            </span>
-          </button>
-          <button
-            type="button"
-            role="radio"
-            class="panel-form__provider"
-            :aria-checked="values.provider === 'openai-compatible'"
-            :class="{ 'panel-form__provider--active': values.provider === 'openai-compatible' }"
-            @click="values.provider = 'openai-compatible'"
-          >
-            <ProviderMark provider="openai-compatible" :size="24" />
-            <span class="panel-form__provider-text">
-              <strong>سازگار با OpenAI</strong>
-              <span>OpenAI و سرویس‌های مشابه</span>
+              <strong>{{ option.title }}</strong>
+              <span>{{ option.subtitle }}</span>
             </span>
           </button>
         </div>
@@ -165,24 +195,44 @@ async function copyId() {
         v-model="values.externalModelId"
         label="شناسه مدل نزد ارائه‌دهنده (Model ID)"
         dir="ltr"
-        placeholder="gpt-4o-mini"
+        :placeholder="placeholders.modelId"
         :error="validation.externalModelId"
         required
       />
       <AppInput
         v-model="values.baseUrl"
-        label="آدرس پایه (اختیاری)"
+        label="آدرس پایه (اختیاری — در صورت خالی بودن، آدرس رسمی ارائه‌دهنده استفاده می‌شود)"
         dir="ltr"
-        placeholder="https://api.openai.com/v1"
+        :placeholder="placeholders.baseUrl"
       />
       <AppInput
         v-model="values.apiKey"
-        :label="model?.hasApiKey ? 'کلید API (برای جایگزینی مقدار جدید وارد کنید)' : 'کلید API (اختیاری برای ماک)'"
+        :label="model?.hasApiKey ? 'کلید API (برای جایگزینی مقدار جدید وارد کنید)' : apiKeyLabels[values.provider]"
         type="password"
         dir="ltr"
         autocomplete="off"
         placeholder="sk-…"
       />
+
+      <div class="panel-form__field">
+        <span class="panel-form__label">قابلیت‌های مدل (اختیاری)</span>
+        <div class="panel-form__capabilities">
+          <button
+            v-for="capability in MODEL_CAPABILITIES"
+            :key="capability"
+            type="button"
+            class="panel-form__capability"
+            :aria-pressed="values.capabilities.includes(capability)"
+            :class="{ 'panel-form__capability--on': values.capabilities.includes(capability) }"
+            @click="toggleCapability(capability)"
+          >
+            {{ MODEL_CAPABILITY_LABELS[capability] }}
+          </button>
+        </div>
+        <span class="panel-form__hint">
+          قابلیت‌ها ویژگی‌های جانبی این مدل را معرفی می‌کنند و در فهرست انتخاب کاربران نمایش داده می‌شوند.
+        </span>
+      </div>
 
       <!-- دسترسی و وضعیت -->
       <p class="panel-form__section">دسترسی و وضعیت</p>
@@ -408,6 +458,41 @@ async function copyId() {
 
 .panel-form__provider--active .panel-form__provider-text span {
   color: var(--text-on-accent-soft);
+}
+
+.panel-form__capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.panel-form__capability {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.76rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  color: var(--text-2);
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.panel-form__capability:hover {
+  border-color: var(--border-strong);
+  color: var(--text-1);
+}
+
+.panel-form__capability--on {
+  background: var(--accent-soft);
+  border-color: var(--accent-soft-border);
+  color: var(--text-on-accent-soft);
+}
+
+.panel-form__hint {
+  font-size: 0.7rem;
+  color: var(--text-3);
 }
 
 .panel-form__switch-row {

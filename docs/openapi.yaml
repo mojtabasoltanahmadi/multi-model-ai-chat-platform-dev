@@ -870,7 +870,8 @@ components:
           maxLength: 100
         provider:
           type: string
-          enum: [mock, openai-compatible]
+          enum: [mock, openai-compatible, anthropic, google]
+          description: One entry per registered adapter (backend/src/ai/adapters/).
         externalModelId:
           type: string
           maxLength: 200
@@ -879,7 +880,16 @@ components:
           type: string
           nullable: true
           maxLength: 500
-          description: OpenAI-compatible base URL; `null` uses the provider default.
+          description: Optional base URL override; `null` uses the adapter's provider default.
+        capabilities:
+          type: array
+          items:
+            type: string
+            enum: [web-search, reasoning]
+          description: |
+            Declared capabilities from the closed set, validated at the admin
+            boundary. Capabilities only unlock opt-in features; they never
+            gate the base turn.
         isActive:
           type: boolean
         isFree:
@@ -907,7 +917,7 @@ components:
           maxLength: 100
         provider:
           type: string
-          enum: [mock, openai-compatible]
+          enum: [mock, openai-compatible, anthropic, google]
         externalModelId:
           type: string
           minLength: 1
@@ -915,12 +925,19 @@ components:
         baseUrl:
           type: string
           maxLength: 500
-          description: Optional; only meaningful for `openai-compatible`.
+          description: Optional base URL override (adapter applies its provider default when omitted).
         apiKey:
           type: string
           maxLength: 500
           writeOnly: true
-          description: Optional for `mock`; required in practice for `openai-compatible` (enforced at call time, not creation).
+          description: Optional for `mock`; required in practice for real providers (enforced at call time as `invalid-config`, not creation).
+        capabilities:
+          type: array
+          maxItems: 2
+          uniqueItems: true
+          items:
+            type: string
+            enum: [web-search, reasoning]
         isActive:
           type: boolean
           default: true
@@ -940,7 +957,7 @@ components:
           maxLength: 100
         provider:
           type: string
-          enum: [mock, openai-compatible]
+          enum: [mock, openai-compatible, anthropic, google]
         externalModelId:
           type: string
           minLength: 1
@@ -954,6 +971,14 @@ components:
           type: string
           maxLength: 500
           writeOnly: true
+        capabilities:
+          type: array
+          maxItems: 2
+          uniqueItems: true
+          items:
+            type: string
+            enum: [web-search, reasoning]
+          description: Replaces the whole list on send.
         isActive:
           type: boolean
         isFree:
@@ -975,7 +1000,7 @@ components:
           type: string
         provider:
           type: string
-          enum: [mock, openai-compatible]
+          enum: [mock, openai-compatible, anthropic, google]
 
     StreamMetaEvent:
       type: object

@@ -633,3 +633,60 @@ had to stop the batch rather than silently continue the rest.
   with a retry and the third `pending` with no request issued, and the retry sent that file first and
   the third only after it succeeded; a single file behaved like a one-item batch; a reload restored
   every chip and status, and the console stayed free of Vue warnings.
+
+## Stage 18 — Multi-provider abstraction (Adapter/Strategy) + model capabilities
+
+The single `AiProviderService` with an internal `switch` (mock + openai-compatible) became a real
+provider platform: the day-7-8 contract's §5 adapter split, the closed error taxonomy, and model
+capabilities — the provider/model core of [day-7-8-decisions.md](architecture/day-7-8-decisions.md).
+Quota/usage, plans, web search and fallback remain separate work packages and were NOT built here.
+
+**Backend**
+- `ai/provider-adapter.ts`: the `ProviderAdapter` interface (`streamChat(history, model, signal)`),
+  the normalized `ProviderEvent` union (`text` / `status` / `usage`) and two shared helpers —
+  `sseDataLines` (SSE `data:` line reader) and `requestSignalWithTimeout` (per-request abort that
+  honors the orchestrator's shutdown signal plus `AI_REQUEST_TIMEOUT_MS`).
+- `ai/provider-errors.ts`: `ProviderError` with the closed kind set (`timeout`, `rate-limit`,
+  `unavailable`, `auth`, `invalid-request`, `invalid-config`, `unknown`) and the shared HTTP-status
+  mapping. Adapters throw only `ProviderError`; the generation loop branches on `kind` only.
+- `ai/adapters/`: `mock` (extracted), `openai-compatible` (extracted verbatim: same request shape,
+  same SSE parsing; usage parsed only when the provider sends it — `stream_options` is deliberately
+  NOT sent for compatibility), and new native `anthropic` (Messages API, `x-api-key` +
+  `anthropic-version: 2023-06-01`, `max_tokens: 4096`; `thinking_delta` and every non-text channel
+  are silently dropped — INV-12) and `google` (Gemini `streamGenerateContent`, `x-goog-api-key`
+  header, `assistant`→`model` role mapping with leading model turns dropped, last `usageMetadata`
+  wins).
+- `AiProviderService` is now the strategy orchestrator: a `Map<AiProviderKind, ProviderAdapter>`;
+  an unknown provider value in the DB fails fast as `invalid-config`; it owns per-request abort +
+  shutdown cleanup. Adding a provider = one adapter class + one map entry.
+- `messages.service.ts` `runGeneration` consumes `ProviderEvent` (text → the unchanged delta path;
+  usage → logged as `ProviderUsage messageId=…`; status → ignored for now) and maps failures: kind
+  `timeout` (or a bare `AbortError`, kept as defense in depth) → the existing timeout Persian
+  sentence, everything else → the existing generic sentence. `errorMessage` on the row keeps the
+  internal detail; client payloads stay safe.
+- `ai_models` gains `capabilities jsonb NOT NULL DEFAULT '[]'` (DB_SYNCHRONIZE dev shortcut) and
+  `AiProviderKind` gains `'anthropic' | 'google'`. Closed set `MODEL_CAPABILITIES = ['web-search',
+  'reasoning']` in `models/model-capabilities.ts`; DTOs validate (`@IsIn`, `each`) and the service
+  normalizes (dedupe + drop-unknown as the second gate). Capabilities ride `SafeModel`, so
+  `GET /models` and the admin endpoints return them without any new endpoint.
+
+**Frontend**
+- `api/types.ts`: provider union + `ModelCapability` + `MODEL_CAPABILITIES` + Persian labels;
+  `AiModel.capabilities`; payloads accept `capabilities`.
+- `ProviderMark.vue`: refactored to a 4-entry identity map (same theme-constant gradient approach,
+  abstract glyphs, no vendor logos) — anthropic terracotta A-frame, google blue→teal spark.
+- `ModelSelector.vue`: provider labels for all kinds + tiny capability glyphs (magnifier / spark)
+  with Persian `title`/`aria-label` on option rows.
+- `AdminModelPanel.vue`: provider cards are data-driven (4 kinds), capability pill toggles
+  (`aria-pressed`, `--accent-soft` ON state), per-provider Model ID / base URL placeholders and
+  API-key labels; payloads wired through `AdminModelsView.vue`. `ModelTable.vue` labels extended.
+
+**Verification**
+- Backend `tsc --noEmit` clean; Jest **224/224** (was 175 — new suites: each adapter vs a fake
+  `fetch` (happy path, malformed lines, usage extraction, every error kind, INV-12 thinking-strip),
+  orchestrator strategy routing + unknown-kind `invalid-config` + shutdown abort, capabilities
+  normalization + provider kinds; messages specs updated to the `ProviderEvent` shape).
+- Frontend `vue-tsc` + production build clean; 7/7 upload-queue checks still pass; Persian/Latin
+  glued-letter sweep clean.
+- Smoke test extended (see below); real Anthropic/Gemini streams need live API keys — adapter wire
+  formats are unit-tested against the documented API shapes and flagged for a key-holding manual pass.

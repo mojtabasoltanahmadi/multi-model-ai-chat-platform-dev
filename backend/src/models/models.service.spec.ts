@@ -214,4 +214,71 @@ describe('ModelsService', () => {
       });
     });
   });
+
+  describe('capabilities', () => {
+    it('normalizes capabilities on create (dedupe, closed set)', async () => {
+      repository.exists.mockResolvedValue(true);
+      repository.save.mockImplementation(async (data: any) => ({ id: 'model-1', ...data }));
+      const created = await service.create({
+        name: 'X',
+        provider: 'anthropic',
+        externalModelId: 'claude-3-5-sonnet-latest',
+        capabilities: ['web-search', 'reasoning', 'web-search'],
+      } as any);
+      expect(created.capabilities).toEqual(['web-search', 'reasoning']);
+    });
+
+    it('stores an empty list when no capabilities are declared', async () => {
+      repository.exists.mockResolvedValue(true);
+      repository.save.mockImplementation(async (data: any) => ({ id: 'model-1', ...data }));
+      const created = await service.create({
+        name: 'X',
+        provider: 'google',
+        externalModelId: 'gemini-1.5-flash',
+      } as any);
+      expect(created.capabilities).toEqual([]);
+    });
+
+    it('drops unknown capability values at the service boundary (DTO is the first gate)', async () => {
+      repository.exists.mockResolvedValue(true);
+      repository.save.mockImplementation(async (data: any) => ({ id: 'model-1', ...data }));
+      const created = await service.create({
+        name: 'X',
+        provider: 'mock',
+        externalModelId: 'x',
+        capabilities: ['web-search', 'mystery-capability'],
+      } as any);
+      expect(created.capabilities).toEqual(['web-search']);
+    });
+
+    it('replaces capabilities on update', async () => {
+      repository.findOne.mockResolvedValue(model({ capabilities: ['web-search'] }));
+      await expect(
+        service.update('model-1', { capabilities: ['reasoning'] } as any),
+      ).resolves.toMatchObject({ capabilities: ['reasoning'] });
+    });
+
+    it('leaves capabilities untouched when the update omits them', async () => {
+      repository.findOne.mockResolvedValue(model({ capabilities: ['reasoning'] }));
+      await expect(
+        service.update('model-1', { name: 'نام جدید' } as any),
+      ).resolves.toMatchObject({ capabilities: ['reasoning'], name: 'نام جدید' });
+    });
+
+    it('accepts the new provider kinds in create and update', async () => {
+      repository.exists.mockResolvedValue(true);
+      repository.save.mockImplementation(async (data: any) => ({ id: 'model-1', ...data }));
+      const created = await service.create({
+        name: 'Gemini',
+        provider: 'google',
+        externalModelId: 'gemini-1.5-flash',
+      } as any);
+      expect(created.provider).toBe('google');
+
+      repository.findOne.mockResolvedValue(model({ provider: 'openai-compatible' }));
+      await expect(
+        service.update('model-1', { provider: 'anthropic' } as any),
+      ).resolves.toMatchObject({ provider: 'anthropic' });
+    });
+  });
 });
