@@ -210,8 +210,18 @@ export interface StreamMetaPayload {
   replay: boolean;
 }
 
+export interface SearchCompletedPayload {
+  resultCount: number;
+  /** Safe degrade notice (null when the answer uses web context). */
+  warning: string | null;
+}
+
 export interface StreamEvents {
   onMeta: (payload: StreamMetaPayload) => void;
+  /** Web-search turn: the live search began (show "searching…"). */
+  onSearchStarted?: () => void;
+  /** Web-search turn: search finished — show count or the degrade warning. */
+  onSearchCompleted?: (payload: SearchCompletedPayload) => void;
   onDelta: (payload: { text: string }) => void;
   onDone: (payload: { assistantMessage: Message }) => void;
   onError: (message: string) => void;
@@ -277,6 +287,9 @@ export function streamChatMessage(
       try {
         const parsed: unknown = JSON.parse(data);
         if (event === 'meta') events.onMeta(parsed as StreamMetaPayload);
+        else if (event === 'search_started') events.onSearchStarted?.();
+        else if (event === 'search_completed')
+          events.onSearchCompleted?.(parsed as SearchCompletedPayload);
         else if (event === 'delta') events.onDelta(parsed as { text: string });
         else if (event === 'done') events.onDone(parsed as { assistantMessage: Message });
         // Terminal failure is emitted as `failed` by the backend; `error` is

@@ -8,6 +8,7 @@ import { ConversationsModule } from '../conversations/conversations.module';
 import { ModelsModule } from '../models/models.module';
 import { AiModule } from '../ai/ai.module';
 import { FilesModule } from '../files/files.module';
+import { WebsearchModule } from '../websearch/websearch.module';
 
 @Module({
   imports: [
@@ -18,6 +19,8 @@ import { FilesModule } from '../files/files.module';
     // Attached-file context: only READY files of the same conversation are
     // ever resolved (FilesService enforces both conditions).
     FilesModule,
+    // Opt-in web search behind the provider abstraction (Serper for MVP).
+    WebsearchModule,
   ],
   controllers: [MessagesController],
   providers: [MessagesService, GenerationRegistry],

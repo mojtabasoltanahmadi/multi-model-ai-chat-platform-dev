@@ -40,6 +40,17 @@ export type MessageStatus =
   | 'interrupted'
   | 'failed';
 
+/**
+ * A web search citation attached to an assistant turn. Persisted on the
+ * backend row, so history reloads render it without re-searching.
+ */
+export interface MessageSource {
+  title: string;
+  url: string;
+  domain: string;
+  snippet: string;
+}
+
 export interface Message {
   id: string;
   conversationId: string;
@@ -50,6 +61,8 @@ export interface Message {
   modelId: string | null;
   /** Client-generated idempotency token; present on user rows. */
   clientMessageId: string | null;
+  /** Web search citations of this assistant turn (null when answered without search). */
+  sources: MessageSource[] | null;
   /**
    * READY files that were attached as context to this user turn. The ids are
    * resolved against the conversation's file list to render the chips, so a
@@ -147,6 +160,11 @@ export interface AiModel {
 export interface SendMessagePayload {
   content: string;
   modelId?: string;
+  /**
+   * Opt-in live web search for this turn. Omit or false for a normal turn —
+   * the backend never calls a search API unless this is explicitly true.
+   */
+  webSearch?: boolean;
   /**
    * READY files of THIS conversation to use as context. The backend rejects
    * unknown/foreign/not-yet-ready ids with 400 before the stream opens.

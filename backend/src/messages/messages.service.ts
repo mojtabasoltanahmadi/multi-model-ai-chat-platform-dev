@@ -9,6 +9,8 @@ import { AiProviderService } from '../ai/ai-provider.service';
 import { GenerationRegistry, GenerationEvent } from './generation.registry';
 import { AiModel } from '../models/ai-model.entity';
 import { FilesService, AttachedFileContext } from '../files/files.service';
+import { WebSearchService } from '../websearch/websearch.service';
+import type { MessageSource } from '../websearch/websearch.types';
 import { buildContextualPrompt } from './file-context';
 
 const NEW_CONVERSATION_TITLE = 'گفتگوی جدید';
@@ -20,6 +22,12 @@ const TITLE_MAX_LENGTH = 60;
  *  - meta:     once, first (send only): the persisted user row, the
  *              pre-persisted assistant row (status 'pending'), the model, and
  *              whether this send was recognized as a replay (idempotent retry).
+ *  - search_started:   send only, web-search turns: the live search began.
+ *  - search_completed: send only, web-search turns: `resultCount` hits kept;
+ *              `warning` is the safe degrade notice (null when the answer
+ *              uses web context). Clients show "N sources found" or the
+ *              warning and keep streaming — the turn never crashes on a
+ *              search failure.
  *  - snapshot: reconnect only, first: the full content accumulated so far.
  *              The client REPLACES its copy with this — never appends.
  *  - delta:    one new text chunk. Append only. Together with the snapshot
@@ -33,6 +41,8 @@ const TITLE_MAX_LENGTH = 60;
  */
 export type ChatStreamEvent =
   | { type: 'meta'; userMessage: Message; assistantMessage: Message; model: AiModel; replay: boolean }
+  | { type: 'search_started' }
+  | { type: 'search_completed'; resultCount: number; warning: string | null }
   | { type: 'snapshot'; assistantMessage: Message }
   | { type: 'delta'; text: string }
   | { type: 'done'; assistantMessage: Message }
@@ -87,6 +97,7 @@ export class MessagesService {
     private readonly generationRegistry: GenerationRegistry,
     configService: ConfigService,
     private readonly filesService: FilesService,
+    private readonly webSearchService: WebSearchService,
   ) {
     this.persistIntervalMs = configService.get<number>('ai.persistIntervalMs') ?? 1500;
     this.maxFileContextChars = configService.get<number>('files.maxContextChars') ?? 24000;
@@ -155,6 +166,7 @@ export class MessagesService {
     modelId: string | undefined,
     clientMessageId: string | undefined,
     attachments: AttachedFileContext[] = [],
+    webSearchRequested = false,
   ): Promise<ChatTurnHandle> {
     const { conversation, messages } =
       await this.conversationsService.getOwnedWithMessages(userId, conversationId);
@@ -253,16 +265,26 @@ export class MessagesService {
       notify?.();
     });
 
+    // Opt-in live web search (Invariant 1: without an explicit request no
+    // external search API is ever touched). Backend enforcement (Invariant
+    // 7): the global kill-switch gates the provider call — a client flag
+    // alone is never sufficient.
+    const searchActive = webSearchRequested && this.webSearchService.isEnabled();
+
     // The generation loop — deliberately not awaited by the caller. It runs
     // to a persisted terminal state whether or not anyone is subscribed.
-    void this.runGeneration(assistantMessage, history, model, completionResolve).catch(
-      (error) => {
-        // runGeneration handles its own failures; this is a last-resort net.
-        this.logger.error(
-          `Generation loop escaped for message ${messageId}: ${String(error)}`,
-        );
-      },
-    );
+    void this.runGeneration(
+      assistantMessage,
+      history,
+      model,
+      completionResolve,
+      searchActive ? { query: userMessage.content } : null,
+    ).catch((error) => {
+      // runGeneration handles its own failures; this is a last-resort net.
+      this.logger.error(
+        `Generation loop escaped for message ${messageId}: ${String(error)}`,
+      );
+    });
 
     async function* eventFeed(): AsyncGenerator<ChatStreamEvent> {
       // The feed is uniform: meta first (from the resolved turn), then live
@@ -279,7 +301,14 @@ export class MessagesService {
           while (buffer.length > 0) {
             const event = buffer.shift()!;
             if (event.type === 'delta') yield { type: 'delta', text: event.text };
-            else if (event.type === 'done') {
+            else if (event.type === 'search_started') yield { type: 'search_started' };
+            else if (event.type === 'search_completed') {
+              yield {
+                type: 'search_completed',
+                resultCount: event.resultCount,
+                warning: event.warning,
+              };
+            } else if (event.type === 'done') {
               yield { type: 'done', assistantMessage: event.message };
               return;
             } else {
@@ -322,10 +351,12 @@ export class MessagesService {
     history: { role: 'user' | 'assistant'; content: string }[],
     model: AiModel,
     completionResolve: (message: Message) => void,
+    search: { query: string } | null,
   ): Promise<void> {
     const messageId = assistantMessage.id;
     let streamingFlipped = false;
     let lastPersistedAt = 0;
+    let prompt = history;
 
     const persistProgress = async (force: boolean): Promise<void> => {
       const now = Date.now();
@@ -341,7 +372,36 @@ export class MessagesService {
     };
 
     try {
-      for await (const delta of this.aiProviderService.streamChat(history, model)) {
+      // Web search phase (only for opted-in turns): the client's own message
+      // is the query (no extra model call in the MVP). Any failure degrades
+      // to a normal turn — the search warning travels with `search_completed`
+      // and the sources (if any) are persisted on this assistant row, so each
+      // source belongs to exactly the turn that searched for it (Invariant 2).
+      if (search) {
+        this.generationRegistry.publishSearchStarted(messageId);
+        const run = await this.webSearchService.runForTurn(search.query);
+        const sources: MessageSource[] = run.sources;
+        assistantMessage.sources = sources.length > 0 ? sources : null;
+        if (assistantMessage.sources) {
+          await this.messagesRepository.update(messageId, {
+            sources: assistantMessage.sources,
+          });
+        }
+        this.generationRegistry.publishSearchCompleted(
+          messageId,
+          sources.length,
+          run.warning,
+        );
+        if (run.contextBlock) {
+          const last = prompt[prompt.length - 1];
+          prompt = [
+            ...prompt.slice(0, -1),
+            { role: last.role, content: `${run.contextBlock}\n\n${last.content}` },
+          ];
+        }
+      }
+
+      for await (const delta of this.aiProviderService.streamChat(prompt, model)) {
         assistantMessage.content += delta;
         if (!streamingFlipped) {
           assistantMessage.status = 'streaming';
@@ -485,6 +545,10 @@ export class MessagesService {
           const event = queue.shift()!;
           if (event.type === 'delta') {
             yield { type: 'delta', text: event.text };
+          } else if (event.type === 'search_started' || event.type === 'search_completed') {
+            // Transient pre-AI phase: the snapshot already covers the row
+            // state, so reconnecting clients safely skip these.
+            continue;
           } else if (event.type === 'done') {
             yield { type: 'done', assistantMessage: event.message };
             return;

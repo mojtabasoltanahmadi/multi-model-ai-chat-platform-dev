@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue';
 import AppAvatar from '../ui/AppAvatar.vue';
 import FileChip from './FileChip.vue';
+import MessageSources from './MessageSources.vue';
 import { renderMarkdown } from '../../utils/markdown';
 import { formatTime } from '../../utils/format';
 import type { ChatFile, Message } from '../../api/types';
@@ -175,6 +176,12 @@ function retry() {
         تولید این پاسخ ناتمام ماند — می‌توانید دوباره تلاش کنید.
       </p>
     </div>
+
+    <!-- Web search citations of this turn (persisted; history-safe). -->
+    <MessageSources
+      v-if="!isUser && !streaming && message.sources && message.sources.length > 0"
+      :sources="message.sources"
+    />
 
     <div v-if="!isUser && !streaming" class="message__actions">
       <button

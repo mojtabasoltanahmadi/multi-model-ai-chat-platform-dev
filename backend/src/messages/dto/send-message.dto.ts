@@ -2,6 +2,7 @@ import { DEFAULT_MAX_FILES_PER_MESSAGE } from '../../config/configuration';
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsOptional,
   IsString,
   IsUUID,
@@ -57,4 +58,13 @@ export class SendMessageDto {
   })
   @IsUUID('4', { each: true, message: 'شناسه فایل نامعتبر است.' })
   fileIds?: string[];
+
+  /**
+   * Opt-in live web search for this turn. Defaults to false when omitted,
+   * so requests from older clients behave exactly as before (no external
+   * search API is ever called unless this is explicitly true).
+   */
+  @IsOptional()
+  @IsBoolean({ message: 'گزینه جستجوی وب باید true یا false باشد.' })
+  webSearch?: boolean;
 }

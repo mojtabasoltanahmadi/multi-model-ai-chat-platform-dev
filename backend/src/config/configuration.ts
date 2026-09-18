@@ -53,6 +53,17 @@ export default () => ({
     secretKey: process.env.MINIO_SECRET_KEY ?? 'minioadmin',
     bucket: process.env.MINIO_BUCKET ?? 'chat-files',
   },
+  // ---- Web search (opt-in per chat turn; Serper for the MVP) ----
+  websearch: {
+    enabled: process.env.WEB_SEARCH_ENABLED === 'true',
+    provider: process.env.WEB_SEARCH_PROVIDER ?? 'serper',
+    serperApiKey: process.env.SERPER_API_KEY ?? '',
+    maxResults: parseInt(process.env.WEB_SEARCH_MAX_RESULTS ?? '5', 10),
+    timeoutMs: parseInt(process.env.WEB_SEARCH_TIMEOUT_MS ?? '5000', 10),
+    maxQueryLength: parseInt(process.env.WEB_SEARCH_MAX_QUERY_LENGTH ?? '500', 10),
+    // Cap on the search block injected into the model prompt.
+    maxContextChars: parseInt(process.env.WEB_SEARCH_MAX_CONTEXT_CHARS ?? '6000', 10),
+  },
   queue: {
     redisHost: process.env.REDIS_HOST ?? 'localhost',
     redisPort: parseInt(process.env.REDIS_PORT ?? '6379', 10),

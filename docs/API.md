@@ -25,7 +25,7 @@ JWT payload: `{ sub: userId, email, role }`, expires in `JWT_EXPIRES_IN` (defaul
 
 ## Messages (streaming)
 
-`POST /conversations/:conversationId/messages` — body `{ content, modelId?, clientMessageId? }`
+`POST /conversations/:conversationId/messages` — body `{ content, modelId?, clientMessageId?, webSearch? }`
 
 - `content` must be non-blank, ≤ 4000 chars (validated at the boundary)
 - `modelId` optional; must reference a model that is **active** (and **free** for FREE-plan
@@ -39,6 +39,9 @@ JWT payload: `{ sub: userId, email, role }`, expires in `JWT_EXPIRES_IN` (defaul
   added to the prompt. Any id that is unknown, belongs to another conversation/user, or is not
   `READY` rejects the send with 400 (before the stream starts). See
   [FILES.md](FILES.md#chat-integration).
+- `webSearch` optional boolean (default `false`); when `true` the backend runs a live web
+  search (Serper for the MVP) and injects the results into the model prompt. Omitted/false
+  turns never call a search API. See [Web search](#web-search).
 
 ### Pre-flight
 
@@ -77,6 +80,43 @@ data: { "assistantMessage": { status: "completed", content, ... } }
 
 `meta` carries the real `assistantMessage.id` so the client can swap its placeholder for
 the persisted row immediately (no race between optimistic UI and DB state).
+
+### Web search
+
+Opt-in per turn via `webSearch: true`. Lifecycle on a searched turn:
+
+```
+event: meta
+event: search_started
+data: {}
+event: search_completed
+data: { "resultCount": 5, "warning": null }
+event: delta            // answer streams as usual
+...
+event: done
+data: { "assistantMessage": { status: "completed", sources: [...], ... } }
+```
+
+- The search runs inside the detached generation loop, before the AI call: the client
+  shows «در حال جستجو در وب…», then «N منبع پیدا شد», then the answer streams.
+- `warning` (non-null) means the search degraded — the answer below was produced
+  **without** web context (timeout, rate limit, network, empty results, missing key).
+  The turn still completes; the client surfaces the warning once.
+- Sources are persisted on the assistant row (`messages.sources`, jsonb) and echoed in
+  `done`/`failed` payloads, so history reloads render citations without re-searching.
+  Search runs only for new turns with `webSearch: true` — never on history load.
+- Backend enforcement: the global `WEB_SEARCH_ENABLED` kill-switch gates the provider
+  call (a client flag alone is never sufficient); all chat endpoints already require
+  authentication. Only `http:`/`https:` URLs are persisted or linked.
+- Environment: `WEB_SEARCH_ENABLED`, `WEB_SEARCH_PROVIDER=serper`, `SERPER_API_KEY`
+  (secret — `.env` only, never committed), `WEB_SEARCH_MAX_RESULTS` (default 5),
+  `WEB_SEARCH_TIMEOUT_MS` (default 5000), `WEB_SEARCH_MAX_QUERY_LENGTH` (default 500),
+  `WEB_SEARCH_MAX_CONTEXT_CHARS` (default 6000). Without a key the turn degrades with
+  a safe warning; nothing throws and no secret is ever logged or returned.
+
+```ts
+interface MessageSource { title: string; url: string; domain: string; snippet: string; }
+```
 
 ### Replay
 
@@ -161,6 +201,7 @@ interface Message {
   errorMessage: string | null;   // server-side detail, never leaked to client
   modelId: string | null;
   clientMessageId: string | null; // user rows only
+  sources: MessageSource[] | null; // assistant rows answered with web search
   createdAt: string;             // ISO
 }
 ```
