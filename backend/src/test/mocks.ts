@@ -38,6 +38,7 @@ export function createMockRepository() {
     }),
     find: mockFn(async () => store),
     findOne: mockFn(async () => null),
+    count: mockFn(async () => store.length),
     exists: mockFn(async () => false),
     update: mockFn(async () => undefined),
     insert: mockFn(async () => undefined),

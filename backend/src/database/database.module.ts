@@ -13,6 +13,8 @@ import { Subscription } from '../billing/subscription.entity';
 import { Payment } from '../billing/payment.entity';
 import { WebhookEvent } from '../billing/webhook-event.entity';
 import { AuditLog } from '../billing/audit-log.entity';
+import { Theme } from '../themes/theme.entity';
+import { UserPreference } from '../preferences/user-preference.entity';
 
 /**
  * Central TypeORM setup. `synchronize` auto-creates the schema and is a
@@ -44,6 +46,8 @@ import { AuditLog } from '../billing/audit-log.entity';
           Payment,
           WebhookEvent,
           AuditLog,
+          Theme,
+          UserPreference,
         ],
         logging: false,
       }),
