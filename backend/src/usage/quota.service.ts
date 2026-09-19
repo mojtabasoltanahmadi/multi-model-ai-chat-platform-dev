@@ -61,14 +61,18 @@ export class QuotaService {
    * Throws 429 when the plan's daily message or token quota is exhausted.
    * Consumed = today's usage rows for the user whose outcome is NOT 'failed'
    * (see class doc).
+   *
+   * `limits` overrides the env-derived defaults with the caller's
+   * subscription-plan quota (EntitlementsService); without it the behavior
+   * is exactly the pre-billing one.
    */
-  async assertQuota(userId: string, plan: UserPlan): Promise<void> {
-    const snapshot = await this.snapshotFor(userId, plan);
+  async assertQuota(userId: string, plan: UserPlan, limits?: PlanQuota): Promise<void> {
+    const snapshot = await this.snapshotFor(userId, plan, limits);
     if (snapshot.remaining <= 0) {
       this.logger.log(`QuotaRejected userId=${userId} used=${snapshot.used} limit=messages`);
       throw new HttpException(QUOTA_EXHAUSTED_MESSAGE, HttpStatus.TOO_MANY_REQUESTS);
     }
-    const { dailyTokens } = this.quotaFor(plan);
+    const { dailyTokens } = limits ?? this.quotaFor(plan);
     if (dailyTokens !== null && snapshot.tokens >= dailyTokens) {
       this.logger.log(
         `QuotaRejected userId=${userId} tokens=${snapshot.tokens} limit=tokens`,
@@ -78,8 +82,8 @@ export class QuotaService {
   }
 
   /** Today's consumption for the quota UI (GET /usage/me). */
-  async snapshotFor(userId: string, plan: UserPlan): Promise<QuotaSnapshot> {
-    const { dailyMessages } = this.quotaFor(plan);
+  async snapshotFor(userId: string, plan: UserPlan, limits?: PlanQuota): Promise<QuotaSnapshot> {
+    const dailyMessages = limits?.dailyMessages ?? this.quotaFor(plan).dailyMessages;
     // QueryBuilder takes ENTITY property names (camelCase) — it maps them to
     // the quoted snake_case columns itself.
     const row = await this.usageRepository

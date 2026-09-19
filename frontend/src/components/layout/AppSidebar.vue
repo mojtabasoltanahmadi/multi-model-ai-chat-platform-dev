@@ -133,6 +133,18 @@ function goAdminUsage() {
   void router.push({ name: 'admin-usage' });
 }
 
+function goSubscription() {
+  profileOpen.value = false;
+  emit('close');
+  void router.push({ name: 'subscription' });
+}
+
+function goAdminBilling() {
+  profileOpen.value = false;
+  emit('close');
+  void router.push({ name: 'admin-billing' });
+}
+
 function onLogout() {
   profileOpen.value = false;
   emit('close');
@@ -324,6 +336,30 @@ function onCreate() {
                 <path d="M4 20V10M10 20V4M16 20v-7M22 20H2" />
               </svg>
               مصرف و هزینه‌ها
+            </button>
+            <button
+              v-if="auth.isAdmin.value"
+              type="button"
+              class="sidebar__menu-item"
+              role="menuitem"
+              @click="goAdminBilling"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="2" y="5" width="20" height="14" rx="2" />
+                <path d="M2 10h20" />
+              </svg>
+              مدیریت پرداخت‌ها
+            </button>
+            <button
+              type="button"
+              class="sidebar__menu-item"
+              role="menuitem"
+              @click="goSubscription"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 2 15 8.5 22 9.3 17 14l1.2 7L12 17.8 5.8 21 7 14 2 9.3 9 8.5Z" />
+              </svg>
+              اشتراک و پرداخت
             </button>
             <button type="button" class="sidebar__menu-item sidebar__menu-item--exit" role="menuitem" @click="onLogout">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">

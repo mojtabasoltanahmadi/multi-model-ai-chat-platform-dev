@@ -1,12 +1,21 @@
 import type {
+  AdminPayment,
+  AdminSubscriptionRow,
   AdminUsageSummary,
   AdminUser,
   AiModel,
+  AuditLogEntry,
   AuthResponse,
   ChatFile,
+  CreatePlanPayload,
   Message,
+  Plan,
   SendMessagePayload,
+  SimulateResponse,
+  SubscriptionOverview,
+  UpdatePlanPayload,
   UsageSummary,
+  UserPaymentView,
   UserPlan,
 } from './types';
 
@@ -167,6 +176,89 @@ export function fetchAdminUsers(): Promise<AdminUser[]> {
 /** Changes a user's plan; takes effect on that user's next request. */
 export function setAdminUserPlan(userId: string, plan: UserPlan): Promise<AdminUser> {
   return api<AdminUser>(`/admin/users/${userId}/plan`, { method: 'PATCH', body: { plan } });
+}
+
+// ---- Billing: plans, payments, subscriptions (day 9-10) ----
+// The backend resolves every price and entitlement — the UI never sends or
+// stores authoritative money/access values.
+
+export function fetchBillingPlans(): Promise<Plan[]> {
+  return api<Plan[]>('/billing/plans');
+}
+
+export function fetchSubscriptionOverview(): Promise<SubscriptionOverview> {
+  return api<SubscriptionOverview>('/billing/subscription/me');
+}
+
+export function cancelMySubscription(): Promise<SubscriptionOverview> {
+  return api<SubscriptionOverview>('/billing/subscription/cancel', { method: 'POST' });
+}
+
+export function fetchMyPayments(): Promise<UserPaymentView[]> {
+  return api<UserPaymentView[]>('/billing/payments');
+}
+
+/** Starts a checkout for a plan; the server returns a PENDING payment. */
+export function createPayment(planId: string): Promise<UserPaymentView> {
+  return api<UserPaymentView>('/billing/payments', { method: 'POST', body: { planId } });
+}
+
+export function cancelMyPayment(paymentId: string): Promise<UserPaymentView> {
+  return api<UserPaymentView>(`/billing/payments/${paymentId}/cancel`, { method: 'POST' });
+}
+
+/** MVP gateway simulator: applies a scenario through the real webhook pipeline. */
+export function simulatePayment(paymentId: string, scenario: string): Promise<SimulateResponse> {
+  return api<SimulateResponse>(`/billing/payments/${paymentId}/simulate`, {
+    method: 'POST',
+    body: { scenario },
+  });
+}
+
+export function fetchAdminBillingPlans(): Promise<Plan[]> {
+  return api<Plan[]>('/admin/billing/plans');
+}
+
+export function createAdminPlan(payload: CreatePlanPayload): Promise<Plan> {
+  return api<Plan>('/admin/billing/plans', { method: 'POST', body: payload });
+}
+
+export function updateAdminPlan(planId: string, payload: UpdatePlanPayload): Promise<Plan> {
+  return api<Plan>(`/admin/billing/plans/${planId}`, { method: 'PATCH', body: payload });
+}
+
+export function setAdminPlanActive(planId: string, isActive: boolean): Promise<Plan> {
+  return api<Plan>(`/admin/billing/plans/${planId}/${isActive ? 'activate' : 'deactivate'}`, {
+    method: 'POST',
+  });
+}
+
+export function fetchAdminPayments(filters: { userId?: string; status?: string } = {}): Promise<AdminPayment[]> {
+  const params = new URLSearchParams();
+  if (filters.userId) params.set('userId', filters.userId);
+  if (filters.status) params.set('status', filters.status);
+  const query = params.toString();
+  return api<AdminPayment[]>(`/admin/billing/payments${query ? `?${query}` : ''}`);
+}
+
+export function fetchAdminSubscriptions(
+  filters: { userId?: string; status?: string } = {},
+): Promise<AdminSubscriptionRow[]> {
+  const params = new URLSearchParams();
+  if (filters.userId) params.set('userId', filters.userId);
+  if (filters.status) params.set('status', filters.status);
+  const query = params.toString();
+  return api<AdminSubscriptionRow[]>(`/admin/billing/subscriptions${query ? `?${query}` : ''}`);
+}
+
+export function fetchAdminAuditLogs(
+  filters: { eventType?: string; userId?: string } = {},
+): Promise<AuditLogEntry[]> {
+  const params = new URLSearchParams();
+  if (filters.eventType) params.set('eventType', filters.eventType);
+  if (filters.userId) params.set('userId', filters.userId);
+  const query = params.toString();
+  return api<AuditLogEntry[]>(`/admin/billing/audit${query ? `?${query}` : ''}`);
 }
 
 /** Single file status, used to poll a file until it is READY/FAILED. */

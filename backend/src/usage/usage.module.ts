@@ -6,9 +6,10 @@ import { QuotaService } from './quota.service';
 import { UsageController } from './usage.controller';
 import { AdminUsageController } from './admin-usage.controller';
 import { UsersModule } from '../users/users.module';
+import { BillingModule } from '../billing/billing.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([UsageRecord]), UsersModule],
+  imports: [TypeOrmModule.forFeature([UsageRecord]), UsersModule, BillingModule],
   controllers: [UsageController, AdminUsageController],
   providers: [UsageService, QuotaService],
   exports: [UsageService, QuotaService],
