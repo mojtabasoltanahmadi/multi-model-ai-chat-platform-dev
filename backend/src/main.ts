@@ -1,11 +1,14 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // rawBody is required to verify the payment webhook's HMAC signature over
+  // the exact bytes the gateway signed (a re-serialized body would not match).
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true });
 
   app.setGlobalPrefix('api');
 
