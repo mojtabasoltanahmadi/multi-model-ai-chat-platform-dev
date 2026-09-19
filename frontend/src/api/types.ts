@@ -2,10 +2,15 @@
 
 export type UserRole = 'user' | 'admin';
 
+/** Subscription plan — the backend re-reads it per request (never from JWT). */
+export type UserPlan = 'free' | 'premium';
+
 export interface User {
   id: string;
   email: string;
   role: UserRole;
+  /** Present on fresh reads (/usage/me); the cached session may omit it. */
+  plan?: UserPlan;
 }
 
 export interface AuthResponse {
@@ -140,7 +145,26 @@ export interface AdminFileStatsResponse {
   queue: { waiting: number; active: number; failed: number; completed: number } | null;
 }
 
-export type AiProviderKind = 'mock' | 'openai-compatible';
+/**
+ * Provider kinds — mirrors the backend `AiProviderKind` and its registered
+ * adapters (see backend/src/ai/adapters/). Adding a kind is a backend change
+ * first; this union, the provider labels and ProviderMark follow it.
+ */
+export type AiProviderKind = 'mock' | 'openai-compatible' | 'anthropic' | 'google';
+
+/**
+ * Closed capability set declared per model (mirrors backend
+ * MODEL_CAPABILITIES). Capabilities unlock opt-in features; they are metadata
+ * for the picker until the matching feature ships.
+ */
+export const MODEL_CAPABILITIES = ['web-search', 'reasoning'] as const;
+export type ModelCapability = (typeof MODEL_CAPABILITIES)[number];
+
+/** Persian labels for capability chips (picker + admin panel). */
+export const MODEL_CAPABILITY_LABELS: Record<ModelCapability, string> = {
+  'web-search': 'جستجوی وب',
+  reasoning: 'استدلال',
+};
 
 /** Model as returned by the API — the provider API key is never included. */
 export interface AiModel {
@@ -153,8 +177,95 @@ export interface AiModel {
   /** Available to users on the FREE plan (independent of isActive). */
   isFree: boolean;
   isDefault: boolean;
+  /** Declared capabilities from the closed set; empty list by default. */
+  capabilities: ModelCapability[];
   createdAt: string;
   hasApiKey: boolean;
+}
+
+// ---- Pricing (admin-only fields, INV-14: never exposed to non-admin clients) ----
+
+/**
+ * Model as returned by the ADMIN endpoints: SafeModel + pricing. The
+ * user-facing /models response never carries these fields.
+ */
+export interface AdminModel extends AiModel {
+  inputPricePerMillion: string | null;
+  outputPricePerMillion: string | null;
+}
+
+export interface CreateModelPayload {
+  name: string;
+  provider: AiProviderKind;
+  externalModelId: string;
+  baseUrl?: string;
+  apiKey?: string;
+  capabilities?: ModelCapability[];
+  /** Toman per 1M input tokens; empty ⇒ not priced. */
+  inputPricePerMillion?: string;
+  outputPricePerMillion?: string;
+  isActive?: boolean;
+  isFree?: boolean;
+}
+
+export interface UpdateModelPayload {
+  name?: string;
+  provider?: AiProviderKind;
+  externalModelId?: string;
+  baseUrl?: string | null;
+  apiKey?: string;
+  capabilities?: ModelCapability[];
+  inputPricePerMillion?: string | null;
+  outputPricePerMillion?: string | null;
+  isActive?: boolean;
+  isFree?: boolean;
+}
+
+// ---- Usage & quota ----
+
+/**
+ * Response of GET /usage/me. `quota` is null for admins (they bypass quotas);
+ * `today.used` excludes failed turns, matching the backend quota count.
+ */
+export interface UsageSummary {
+  plan: UserPlan;
+  quota: { dailyMessages: number; dailyTokens: number | null } | null;
+  today: { used: number; remaining: number; tokens: number };
+}
+
+/** Admin user row (GET /admin/users; PATCH /admin/users/:id/plan response). */
+export interface AdminUser {
+  id: string;
+  email: string;
+  role: UserRole;
+  plan: UserPlan;
+  createdAt: string;
+}
+
+export interface UsageSplitRow {
+  turns: number;
+  tokens: number;
+  cost: number;
+}
+
+/** Response of GET /admin/usage/summary — consumption & cost overview. */
+export interface AdminUsageSummary {
+  days: number;
+  totals: {
+    turns: number;
+    failedTurns: number;
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    estimatedCost: number;
+  };
+  perDay: (UsageSplitRow & { date: string })[];
+  perModel: (UsageSplitRow & {
+    modelId: string | null;
+    modelName: string | null;
+    provider: AiProviderKind | null;
+  })[];
+  perUser: (UsageSplitRow & { userId: string; email: string })[];
 }
 
 export interface SendMessagePayload {
@@ -180,24 +291,4 @@ export interface SendMessagePayload {
    * by the backend as a fallback.
    */
   clientMessageId?: string;
-}
-
-export interface CreateModelPayload {
-  name: string;
-  provider: AiProviderKind;
-  externalModelId: string;
-  baseUrl?: string;
-  apiKey?: string;
-  isActive?: boolean;
-  isFree?: boolean;
-}
-
-export interface UpdateModelPayload {
-  name?: string;
-  provider?: AiProviderKind;
-  externalModelId?: string;
-  baseUrl?: string | null;
-  apiKey?: string;
-  isActive?: boolean;
-  isFree?: boolean;
 }

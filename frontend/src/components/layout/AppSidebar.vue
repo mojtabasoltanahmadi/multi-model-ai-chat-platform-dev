@@ -7,6 +7,7 @@ import AppAvatar from '../ui/AppAvatar.vue';
 import ThemeToggle from '../ui/ThemeToggle.vue';
 import AppSkeleton from '../ui/AppSkeleton.vue';
 import { useAuth } from '../../composables/useAuth';
+import { useUsage } from '../../composables/useUsage';
 import { formatRelative } from '../../utils/format';
 import type { Conversation } from '../../api/types';
 
@@ -30,9 +31,17 @@ const emit = defineEmits<{
 
 const router = useRouter();
 const auth = useAuth();
+const usage = useUsage();
 
 const search = ref('');
 const profileOpen = ref(false);
+
+const planLabel = computed(() =>
+  usage.summary.value?.plan === 'premium' ? 'طرح پریمیوم' : 'طرح رایگان',
+);
+const usageExhausted = computed(
+  () => (usage.summary.value?.today.remaining ?? 1) <= 0 && !!usage.summary.value?.quota,
+);
 const profileRoot = ref<HTMLElement | null>(null);
 
 const filtered = computed(() => {
@@ -104,6 +113,8 @@ onBeforeUnmount(() => {
   document.removeEventListener('keydown', onDocumentKeydown);
 });
 
+void usage.refresh();
+
 function goAdmin() {
   profileOpen.value = false;
   emit('close');
@@ -114,6 +125,12 @@ function goAdminFiles() {
   profileOpen.value = false;
   emit('close');
   void router.push({ name: 'admin-files' });
+}
+
+function goAdminUsage() {
+  profileOpen.value = false;
+  emit('close');
+  void router.push({ name: 'admin-usage' });
 }
 
 function onLogout() {
@@ -248,6 +265,20 @@ function onCreate() {
           </svg>
         </button>
 
+        <!-- Quota line (plan + today's usage) — hidden until /usage/me loads;
+             admins bypass quotas and only see the plan badge. -->
+        <p
+          v-if="usage.summary.value"
+          class="sidebar__usage"
+          :class="{ 'sidebar__usage--exhausted': usageExhausted }"
+        >
+          <span class="sidebar__usage-plan">{{ planLabel }}</span>
+          <span v-if="usage.summary.value.quota" class="sidebar__usage-count">
+            پیام‌های امروز: {{ usage.summary.value.today.used.toLocaleString('fa-IR') }} از
+            {{ usage.summary.value.quota.dailyMessages.toLocaleString('fa-IR') }}
+          </span>
+        </p>
+
         <Transition name="sidebar-pop">
           <div v-if="profileOpen" class="sidebar__menu" role="menu">
             <div class="sidebar__menu-section">
@@ -281,6 +312,18 @@ function onCreate() {
                 <path d="M14 3v5h5" />
               </svg>
               وضعیت پردازش فایل‌ها
+            </button>
+            <button
+              v-if="auth.isAdmin.value"
+              type="button"
+              class="sidebar__menu-item"
+              role="menuitem"
+              @click="goAdminUsage"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+                <path d="M4 20V10M10 20V4M16 20v-7M22 20H2" />
+              </svg>
+              مصرف و هزینه‌ها
             </button>
             <button type="button" class="sidebar__menu-item sidebar__menu-item--exit" role="menuitem" @click="onLogout">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
@@ -461,6 +504,37 @@ function onCreate() {
   border-top: 1px solid var(--border-subtle);
   padding-top: 0.6rem;
   margin-top: 0.6rem;
+}
+
+/* Quota line — one quiet line under the profile trigger; amber only when
+   the daily quota is exhausted (matches the composer lock state). */
+.sidebar__usage {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0.45rem 0.5rem 0;
+  font-size: 0.7rem;
+  color: var(--text-3);
+  min-width: 0;
+}
+
+.sidebar__usage-plan {
+  flex-shrink: 0;
+  padding: 0.06rem 0.45rem;
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  color: var(--text-on-accent-soft);
+  font-size: 0.64rem;
+}
+
+.sidebar__usage-count {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar__usage--exhausted {
+  color: var(--warning);
 }
 
 .sidebar__profile-trigger {

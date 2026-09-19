@@ -58,10 +58,14 @@ The Vite dev server proxies `/api` to `http://localhost:4000`, so no CORS setup 
 ### 5. First chat
 
 1. Log in as the admin → open **پنل مدیریت مدل‌ها**.
-2. Create a model. Two provider kinds exist:
+2. Create a model. Four provider kinds exist (one adapter each):
    - `mock` — streams a canned Persian response, no API key needed (great for demos/tests)
    - `openai-compatible` — any OpenAI-compatible streaming API (set `externalModelId`, optional
      `baseUrl`, and `apiKey`)
+   - `anthropic` — Claude via the native Messages API (`x-api-key` + `anthropic-version` headers)
+   - `google` — Gemini via `streamGenerateContent` (`x-goog-api-key` header)
+   Each model can also declare `capabilities` (currently `web-search`, `reasoning`) — metadata
+   the chat picker shows as glyphs.
 3. The first active model automatically becomes the default.
 4. Register a normal user, create a conversation, and chat — responses stream in live.
 5. Add files with the 📎 button — it accepts several at once (at most six per message), and they

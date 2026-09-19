@@ -19,7 +19,7 @@ export function createMockRepository() {
   const saved: any[] = [];
   let autoId = 0;
 
-  return {
+  const repository = {
     store,
     saved,
     create: mockFn((data?: any) => data ?? {}),
@@ -40,15 +40,18 @@ export function createMockRepository() {
     findOne: mockFn(async () => null),
     exists: mockFn(async () => false),
     update: mockFn(async () => undefined),
+    insert: mockFn(async () => undefined),
     remove: mockFn(async (entity: any) => entity),
     manager: {
-      transaction: mockFn(async (callback: any) =>
-        callback({
-          update: mockFn(async () => undefined),
-        }),
-      ),
+      // Transaction callbacks receive the SAME mock methods as the outer
+      // repository, so `manager.save(...)` inside a transaction behaves
+      // identically to a direct `save(...)` (used by the usage-records
+      // transaction wrapper in beginChatTurn).
+      transaction: mockFn(async (callback: any) => callback(repository as any)),
     },
   };
+
+  return repository;
 }
 
 export function httpExceptionStatus(error: unknown): number | undefined {

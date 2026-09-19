@@ -246,19 +246,56 @@ Upload limits and lifecycle: [FILES.md](FILES.md).
 
 ## Admin models (`role=admin` only)
 
+Provider kinds (one registered adapter each, `backend/src/ai/adapters/`):
+`mock` (canned demo stream, no key) · `openai-compatible` (any OpenAI-style
+streaming `/chat/completions`) · `anthropic` (Claude Messages API) ·
+`google` (Gemini `streamGenerateContent`). Model rows additionally carry
+`capabilities` — a closed set (`web-search`, `reasoning`) validated at this
+boundary and surfaced in every model response (picker glyphs, admin panel).
+
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/admin/models` | all models; `apiKey` never returned, `hasApiKey` instead |
-| POST | `/admin/models` | `{ name, provider: 'mock'\|'openai-compatible', externalModelId, baseUrl?, apiKey?, isActive?, isFree? }`; the first active+free model auto-becomes default |
-| PATCH | `/admin/models/:modelId` | partial update (incl. `isFree`); deactivating the default is refused (400); removing free access from the default is refused (400) |
+| POST | `/admin/models` | `{ name, provider: 'mock'\|'openai-compatible'\|'anthropic'\|'google', externalModelId, baseUrl?, apiKey?, capabilities?, inputPricePerMillion?, outputPricePerMillion?, isActive?, isFree? }`; the first active+free model auto-becomes default |
+| PATCH | `/admin/models/:modelId` | partial update (incl. `isFree`, `capabilities`, pricing); deactivating the default is refused (400); removing free access from the default is refused (400) |
 | POST | `/admin/models/:modelId/default` | transactional swap; exactly one default; inactive or non-free models refused (400) |
 | DELETE | `/admin/models/:modelId` | default model deletion refused (400) |
+
+## Usage & quota (authenticated)
+
+One usage row per ACCEPTED chat turn is written atomically with the user
+message row (`message_id` UNIQUE — replays can never double-record). The row
+is terminal-updated exactly once (`completed | failed | interrupted`; tokens
+provider-reported or `chars/4`-estimated with `estimated=true`; cost in Toman
+from the model's per-1M pricing, `null` when unpriced). Reconnects touch
+nothing. **Failed turns are recorded but do not consume the message quota.**
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/usage/me` | `{ plan, quota: { dailyMessages, dailyTokens \| null } \| null, today: { used, remaining, tokens } }`; `quota: null` for admins |
+| GET | `/admin/users` | admin-only list `{ id, email, role, plan, createdAt }` |
+| PATCH | `/admin/users/:userId/plan` | `{ plan: 'free'\|'premium' }` → `{ id, email, plan }`; takes effect on the user's NEXT request (plan is never read from the JWT) |
+| GET | `/admin/usage/summary?days=7` | admin-only `{ days, totals: { turns, failedTurns, inputTokens, outputTokens, totalTokens, estimatedCost }, perDay[], perModel[], perUser[] }` (1 ≤ days ≤ 90; includes failed turns — cost reporting shows real consumption) |
+
+Quota limits are env-configured per deployment (`QUOTA_FREE_DAILY_MESSAGES`
+default 50, `QUOTA_PREMIUM_DAILY_MESSAGES` default 500, optional
+`QUOTA_FREE_DAILY_TOKENS` / `QUOTA_PREMIUM_DAILY_TOKENS`) — the MVP mechanism
+for "admin-defined limits". The quota window is the current UTC day.
+
+Provider failure behavior (all adapters): failures are normalized to a closed
+kind set (`timeout`, `rate-limit`, `unavailable`, `auth`, `invalid-request`,
+`invalid-config`, `unknown`). A turn whose provider fails is persisted as a
+`failed` message with the two existing safe Persian sentences (timeout vs
+generic); internal detail stays in server logs. A missing API key fails fast
+as `invalid-config` (never retried, no mid-stream surprise).
 
 ## Error semantics
 
 | Status | Meaning |
 |---|---|
-| 400 | validation failure (empty/long message, bad UUID, inactive model, default-model rule incl. free access, idempotency content collision, file content/MIME/extension mismatch, attached file not `READY` or foreign, illegal file status transition, reprocess of a non-terminal file) |
+| 400 | validation failure (empty/long message, bad UUID, inactive model, default-model rule incl. free access, idempotency content collision, file content/MIME/extension mismatch, attached file not `READY` or foreign, illegal file status transition, reprocess of a non-terminal file, invalid plan value) |
+| 403 | forbidden (role-gated endpoints; model not allowed for the caller's plan) |
+| 429 | daily quota exhausted pre-stream — messages «سهمیه پیام‌های امروز شما تمام شده است.» or tokens «سهمیه توکن‌های امروز شما تمام شده است.»; admins and idempotent replays are exempt |
 | 401 | missing/invalid/expired JWT |
 | 403 | authenticated but insufficient role — or a model the caller's plan is not allowed to use |
 | 404 | unknown or foreign resource (no existence leak) |

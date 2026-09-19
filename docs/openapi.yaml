@@ -588,6 +588,100 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /usage/me:
+    get:
+      tags: [usage]
+      summary: Quota/usage snapshot for the signed-in user
+      description: |
+        Source for the sidebar quota line and the composer lock. Counted
+        against the current UTC day; usage rows with outcome `failed` do not
+        count. Admins bypass quotas and receive `quota: null`.
+      responses:
+        '200':
+          description: Plan, configured limits and today's consumption.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageSummary'
+        '401':
+          description: Missing/invalid JWT.
+
+  /admin/users:
+    get:
+      tags: [admin-users]
+      summary: List users (admin)
+      responses:
+        '200':
+          description: All users, oldest first (no secrets).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AdminUser'
+        '403':
+          description: Caller is not an admin.
+
+  /admin/users/{userId}/plan:
+    patch:
+      tags: [admin-users]
+      summary: Change a user's plan (admin)
+      description: |
+        Takes effect on the affected user's NEXT request — the plan is read
+        fresh from the DB per send, never from the JWT. Setting the current
+        plan is an idempotent no-op.
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan]
+              properties:
+                plan:
+                  type: string
+                  enum: [free, premium]
+      responses:
+        '200':
+          description: Updated user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+        '400': { description: Invalid plan value. }
+        '403': { description: Caller is not an admin. }
+        '404': { description: Unknown user. }
+
+  /admin/usage/summary:
+    get:
+      tags: [admin-usage]
+      summary: Consumption & cost overview (admin)
+      description: |
+        Totals plus per-day / per-model / per-user aggregation over the last
+        `days` days (1–90, default 7). ALL outcomes are included — cost
+        reporting shows real consumption even for failed turns (the
+        failed-outcome exclusion applies only to quota counting). `cost` is
+        0 for turns whose model has no pricing or was deleted.
+      parameters:
+        - name: days
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 90, default: 7 }
+      responses:
+        '200':
+          description: Aggregated usage and cost.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUsageSummary'
+        '403':
+          description: Caller is not an admin.
+
 components:
   securitySchemes:
     bearerAuth:
@@ -870,7 +964,8 @@ components:
           maxLength: 100
         provider:
           type: string
-          enum: [mock, openai-compatible]
+          enum: [mock, openai-compatible, anthropic, google]
+          description: One entry per registered adapter (backend/src/ai/adapters/).
         externalModelId:
           type: string
           maxLength: 200
@@ -879,7 +974,16 @@ components:
           type: string
           nullable: true
           maxLength: 500
-          description: OpenAI-compatible base URL; `null` uses the provider default.
+          description: Optional base URL override; `null` uses the adapter's provider default.
+        capabilities:
+          type: array
+          items:
+            type: string
+            enum: [web-search, reasoning]
+          description: |
+            Declared capabilities from the closed set, validated at the admin
+            boundary. Capabilities only unlock opt-in features; they never
+            gate the base turn.
         isActive:
           type: boolean
         isFree:
@@ -907,7 +1011,7 @@ components:
           maxLength: 100
         provider:
           type: string
-          enum: [mock, openai-compatible]
+          enum: [mock, openai-compatible, anthropic, google]
         externalModelId:
           type: string
           minLength: 1
@@ -915,12 +1019,25 @@ components:
         baseUrl:
           type: string
           maxLength: 500
-          description: Optional; only meaningful for `openai-compatible`.
+          description: Optional base URL override (adapter applies its provider default when omitted).
         apiKey:
           type: string
           maxLength: 500
           writeOnly: true
-          description: Optional for `mock`; required in practice for `openai-compatible` (enforced at call time, not creation).
+          description: Optional for `mock`; required in practice for real providers (enforced at call time as `invalid-config`, not creation).
+        capabilities:
+          type: array
+          maxItems: 2
+          uniqueItems: true
+          items:
+            type: string
+            enum: [web-search, reasoning]
+        inputPricePerMillion:
+          type: string
+          description: Toman per 1M input tokens; empty/0 ⇒ not priced (cost null). Admin-only in responses.
+        outputPricePerMillion:
+          type: string
+          description: Toman per 1M output tokens; empty/0 ⇒ not priced (cost null). Admin-only in responses.
         isActive:
           type: boolean
           default: true
@@ -940,7 +1057,7 @@ components:
           maxLength: 100
         provider:
           type: string
-          enum: [mock, openai-compatible]
+          enum: [mock, openai-compatible, anthropic, google]
         externalModelId:
           type: string
           minLength: 1
@@ -954,6 +1071,20 @@ components:
           type: string
           maxLength: 500
           writeOnly: true
+        capabilities:
+          type: array
+          maxItems: 2
+          uniqueItems: true
+          items:
+            type: string
+            enum: [web-search, reasoning]
+          description: Replaces the whole list on send.
+        inputPricePerMillion:
+          type: string
+          nullable: true
+        outputPricePerMillion:
+          type: string
+          nullable: true
         isActive:
           type: boolean
         isFree:
@@ -975,7 +1106,7 @@ components:
           type: string
         provider:
           type: string
-          enum: [mock, openai-compatible]
+          enum: [mock, openai-compatible, anthropic, google]
 
     StreamMetaEvent:
       type: object
@@ -1076,3 +1207,100 @@ components:
             message:
               type: string
               description: Persian, user-displayable message (safe; no technical detail).
+
+    # ---- Usage & quota ----
+    UsageSummary:
+      type: object
+      required: [plan, quota, today]
+      properties:
+        plan:
+          type: string
+          enum: [free, premium]
+        quota:
+          nullable: true
+          description: Null for admins (they bypass quotas).
+          type: object
+          required: [dailyMessages, dailyTokens]
+          properties:
+            dailyMessages:
+              type: integer
+              description: Env-configured daily message limit for the plan.
+            dailyTokens:
+              type: integer
+              nullable: true
+              description: Optional daily token cap; null ⇒ unlimited.
+        today:
+          type: object
+          required: [used, remaining, tokens]
+          properties:
+            used:
+              type: integer
+              description: Accepted turns today (failed turns excluded).
+            remaining:
+              type: integer
+            tokens:
+              type: integer
+              description: Input + output tokens recorded today (failed excluded).
+
+    AdminUser:
+      type: object
+      required: [id, email, role, plan, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        role: { type: string, enum: [user, admin] }
+        plan: { type: string, enum: [free, premium] }
+        createdAt: { type: string, format: date-time }
+
+    AdminUsageSummary:
+      type: object
+      required: [days, totals, perDay, perModel, perUser]
+      properties:
+        days: { type: integer }
+        totals:
+          type: object
+          required: [turns, failedTurns, inputTokens, outputTokens, totalTokens, estimatedCost]
+          properties:
+            turns: { type: integer }
+            failedTurns: { type: integer }
+            inputTokens: { type: integer }
+            outputTokens: { type: integer }
+            totalTokens:
+              type: integer
+              description: Derived (input + output) — never stored separately.
+            estimatedCost:
+              type: number
+              description: Toman; 0 when no turn had pricing.
+        perDay:
+          type: array
+          items:
+            type: object
+            required: [date, turns, tokens, cost]
+            properties:
+              date: { type: string, format: date }
+              turns: { type: integer }
+              tokens: { type: integer }
+              cost: { type: number }
+        perModel:
+          type: array
+          items:
+            type: object
+            required: [turns, tokens, cost]
+            properties:
+              modelId: { type: string, format: uuid, nullable: true }
+              modelName: { type: string, nullable: true }
+              provider: { type: string, nullable: true }
+              turns: { type: integer }
+              tokens: { type: integer }
+              cost: { type: number }
+        perUser:
+          type: array
+          items:
+            type: object
+            required: [userId, email, turns, tokens, cost]
+            properties:
+              userId: { type: string, format: uuid }
+              email: { type: string }
+              turns: { type: integer }
+              tokens: { type: integer }
+              cost: { type: number }

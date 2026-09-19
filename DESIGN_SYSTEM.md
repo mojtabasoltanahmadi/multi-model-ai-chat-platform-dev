@@ -253,10 +253,29 @@ Initial letter on `--accent-soft` circle. Used for users (email initial).
 
 ## ProviderMark — `ProviderMark.vue`
 
-Provider-kind identity tile used in tables, panels and selectors. The MVP ships two
-kinds, each with a fixed gradient (constant across themes, like a logo):
-`mock` → violet + flask glyph · `openai-compatible` → cyan + hexagon-node glyph.
-No fake vendor logos — the backend only knows these two kinds.
+Provider-kind identity tile used in tables, panels and selectors. One entry per registered
+provider kind, each with a fixed gradient (constant across themes, like a logo) and an
+abstract glyph — never a fake vendor logo:
+`mock` → violet + flask · `openai-compatible` → cyan + hexagon-node ·
+`anthropic` → terracotta + A-frame strokes · `google` → blue→teal + four-point spark.
+
+## Quota line — `AppSidebar` profile block
+
+One quiet line under the profile trigger: a plan badge chip (`--accent-soft`
+pill: «طرح رایگان/طرح پریمیوم») plus «پیام‌های امروز: n از m» in `--text-3`.
+Turns `--warning` when the daily quota is exhausted — matching the composer's
+locked Send. Hidden entirely until `/usage/me` loads (no guessing); admins see
+the badge only (their `quota` is null). Data via the `useUsage` singleton,
+refreshed after every terminal stream event.
+
+## Capability chips — picker + admin panel
+
+Models can declare capabilities (closed set `web-search`, `reasoning`).
+- **ModelSelector options**: tiny muted glyph(s) with Persian `title`/`aria-label`
+  (magnifier = جستجوی وب, spark = استدلال) beside the provider label — never text chips,
+  so the option row stays one line.
+- **AdminModelPanel**: pill toggle buttons (`aria-pressed`) in the base-settings section,
+  ON state = `--accent-soft` fill like other selected chips. No new tokens introduced.
 
 ## Drawer — `AppDrawer.vue`
 

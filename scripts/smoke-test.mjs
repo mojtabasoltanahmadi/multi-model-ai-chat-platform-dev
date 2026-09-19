@@ -261,6 +261,101 @@ async function main() {
 
   await api('DELETE', `/admin/models/${premiumModel.id}`, { token: adminToken });
 
+  // ---------- Multi-provider kinds + model capabilities ----------
+  // A native-provider model without an API key must fail GRACEFULLY: the turn
+  // opens as SSE, the provider error is normalized (invalid-config) and the
+  // turn terminates as `failed` with a safe Persian message — never a 5xx.
+  const anthropicModel = (
+    await api('POST', '/admin/models', {
+      token: adminToken,
+      body: {
+        name: 'Claude (بدون کلید)',
+        provider: 'anthropic',
+        externalModelId: 'claude-3-5-sonnet-latest',
+        capabilities: ['web-search', 'reasoning'],
+      },
+    })
+  ).json;
+  check(
+    'admin creates an anthropic model with capabilities (201)',
+    anthropicModel?.provider === 'anthropic' &&
+      Array.isArray(anthropicModel?.capabilities) &&
+      anthropicModel.capabilities.length === 2,
+  );
+
+  const badCapability = await api('POST', '/admin/models', {
+    token: adminToken,
+    body: { name: 'بدون قابلیت', provider: 'mock', externalModelId: 'x', capabilities: ['teleport'] },
+  });
+  check('unknown capability value rejected (400)', badCapability.status === 400);
+
+  const unknownProvider = await api('POST', '/admin/models', {
+    token: adminToken,
+    body: { name: 'ناشناس', provider: 'warp-drive', externalModelId: 'x' },
+  });
+  check('unknown provider kind rejected (400)', unknownProvider.status === 400);
+
+  const googleModel = (
+    await api('POST', '/admin/models', {
+      token: adminToken,
+      body: { name: 'Gemini (بدون کلید)', provider: 'google', externalModelId: 'gemini-1.5-flash' },
+    })
+  ).json;
+  check('admin creates a google model (201)', googleModel?.provider === 'google');
+
+  const picker = (await api('GET', '/models', { token: userToken })).json;
+  check(
+    'picker returns the new provider kinds with capabilities',
+    picker.some((m) => m.id === anthropicModel.id && m.capabilities.includes('web-search')) &&
+      picker.some((m) => m.id === googleModel.id),
+  );
+
+  const noKeyConv = await api('POST', '/conversations', { token: userToken, body: {} });
+  const noKeyStream = await streamMessage(userToken, noKeyConv.json.id, {
+    content: 'سلام',
+    modelId: anthropicModel.id,
+  });
+  check(
+    'missing API key fails the turn gracefully (SSE failed, safe message)',
+    noKeyStream.status === 200 &&
+      noKeyStream.finalEvent === 'failed' &&
+      (noKeyStream.events.at(-1)?.data?.message ?? '').includes('موقتاً در دسترس نیست'),
+  );
+
+  const disabledStream = await streamMessage(userToken, noKeyConv.json.id, {
+    content: 'دوباره',
+    modelId: googleModel.id,
+  });
+  check(
+    'google model without key also fails gracefully (SSE failed)',
+    disabledStream.status === 200 && disabledStream.finalEvent === 'failed',
+  );
+
+  // A disabled model receives no new requests (INV-2) — JSON 400 pre-stream.
+  await api('PATCH', `/admin/models/${anthropicModel.id}`, {
+    token: adminToken,
+    body: { isActive: false },
+  });
+  const disabledModelSend = await streamMessage(userToken, noKeyConv.json.id, {
+    content: 'سلام',
+    modelId: anthropicModel.id,
+  });
+  check('disabled model rejected pre-stream (400)', disabledModelSend.status === 400);
+
+  // Deleting a model never breaks history: the failed row survives with its
+  // model reference nulled (SET NULL) and the conversation stays readable.
+  const historyBefore = await api('GET', `/conversations/${noKeyConv.json.id}`, { token: userToken });
+  const failedRow = historyBefore.json.messages.find((m) => m.role === 'assistant');
+  check('failed turn persisted in history', !!failedRow && failedRow.status === 'failed');
+  await api('DELETE', `/admin/models/${anthropicModel.id}`, { token: adminToken });
+  await api('DELETE', `/admin/models/${googleModel.id}`, { token: adminToken });
+  const historyAfter = await api('GET', `/conversations/${noKeyConv.json.id}`, { token: userToken });
+  const rowAfterDelete = historyAfter.json.messages.find((m) => m.id === failedRow.id);
+  check(
+    'history survives model deletion (modelId SET NULL)',
+    historyAfter.status === 200 && !!rowAfterDelete && rowAfterDelete.modelId === null,
+  );
+
   // ---------- Conversations ----------
   const conv = await api('POST', '/conversations', { token: userToken, body: {} });
   check('user creates conversation (201)', conv.status === 201 && !!conv.json?.id);

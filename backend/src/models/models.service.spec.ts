@@ -214,4 +214,122 @@ describe('ModelsService', () => {
       });
     });
   });
+
+  describe('capabilities', () => {
+    it('normalizes capabilities on create (dedupe, closed set)', async () => {
+      repository.exists.mockResolvedValue(true);
+      repository.save.mockImplementation(async (data: any) => ({ id: 'model-1', ...data }));
+      const created = await service.create({
+        name: 'X',
+        provider: 'anthropic',
+        externalModelId: 'claude-3-5-sonnet-latest',
+        capabilities: ['web-search', 'reasoning', 'web-search'],
+      } as any);
+      expect(created.capabilities).toEqual(['web-search', 'reasoning']);
+    });
+
+    it('stores an empty list when no capabilities are declared', async () => {
+      repository.exists.mockResolvedValue(true);
+      repository.save.mockImplementation(async (data: any) => ({ id: 'model-1', ...data }));
+      const created = await service.create({
+        name: 'X',
+        provider: 'google',
+        externalModelId: 'gemini-1.5-flash',
+      } as any);
+      expect(created.capabilities).toEqual([]);
+    });
+
+    it('drops unknown capability values at the service boundary (DTO is the first gate)', async () => {
+      repository.exists.mockResolvedValue(true);
+      repository.save.mockImplementation(async (data: any) => ({ id: 'model-1', ...data }));
+      const created = await service.create({
+        name: 'X',
+        provider: 'mock',
+        externalModelId: 'x',
+        capabilities: ['web-search', 'mystery-capability'],
+      } as any);
+      expect(created.capabilities).toEqual(['web-search']);
+    });
+
+    it('replaces capabilities on update', async () => {
+      repository.findOne.mockResolvedValue(model({ capabilities: ['web-search'] }));
+      await expect(
+        service.update('model-1', { capabilities: ['reasoning'] } as any),
+      ).resolves.toMatchObject({ capabilities: ['reasoning'] });
+    });
+
+    it('leaves capabilities untouched when the update omits them', async () => {
+      repository.findOne.mockResolvedValue(model({ capabilities: ['reasoning'] }));
+      await expect(
+        service.update('model-1', { name: 'نام جدید' } as any),
+      ).resolves.toMatchObject({ capabilities: ['reasoning'], name: 'نام جدید' });
+    });
+
+    it('accepts the new provider kinds in create and update', async () => {
+      repository.exists.mockResolvedValue(true);
+      repository.save.mockImplementation(async (data: any) => ({ id: 'model-1', ...data }));
+      const created = await service.create({
+        name: 'Gemini',
+        provider: 'google',
+        externalModelId: 'gemini-1.5-flash',
+      } as any);
+      expect(created.provider).toBe('google');
+
+      repository.findOne.mockResolvedValue(model({ provider: 'openai-compatible' }));
+      await expect(
+        service.update('model-1', { provider: 'anthropic' } as any),
+      ).resolves.toMatchObject({ provider: 'anthropic' });
+    });
+  });
+
+  describe('pricing serialization (INV-14)', () => {
+    it('user-facing listAvailable strips pricing; admin listAll keeps it', async () => {
+      repository.find.mockResolvedValue([
+        model({
+          inputPricePerMillion: '100.500000',
+          outputPricePerMillion: '200.000000',
+        }),
+      ]);
+
+      const [available] = await service.listAvailable('free');
+      expect(available).not.toHaveProperty('inputPricePerMillion');
+      expect(available).not.toHaveProperty('outputPricePerMillion');
+      expect(available).toHaveProperty('hasApiKey');
+
+      repository.find.mockClear();
+      repository.find.mockResolvedValue([
+        model({
+          inputPricePerMillion: '100.500000',
+          outputPricePerMillion: '200.000000',
+        }),
+      ]);
+      const [admin] = await service.listAll();
+      expect(admin).toMatchObject({
+        inputPricePerMillion: '100.500000',
+        outputPricePerMillion: '200.000000',
+      });
+      expect(admin).not.toHaveProperty('apiKey');
+    });
+
+    it('normalizes prices on create: empty or zero becomes null (not priced)', async () => {
+      repository.exists.mockResolvedValue(true);
+      repository.save.mockImplementation(async (data: any) => ({ id: 'model-1', ...data }));
+      const created = await service.create({
+        name: 'X',
+        provider: 'google',
+        externalModelId: 'gemini-1.5-flash',
+        inputPricePerMillion: '0',
+        outputPricePerMillion: '  ',
+      } as any);
+      expect(created.inputPricePerMillion).toBeNull();
+      expect(created.outputPricePerMillion).toBeNull();
+    });
+
+    it('accepts a positive price string on update', async () => {
+      repository.findOne.mockResolvedValue(model({}));
+      await expect(
+        service.update('model-1', { inputPricePerMillion: '35000' } as any),
+      ).resolves.toMatchObject({ inputPricePerMillion: '35000' });
+    });
+  });
 });

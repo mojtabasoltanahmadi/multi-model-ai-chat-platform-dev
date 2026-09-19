@@ -633,3 +633,152 @@ had to stop the batch rather than silently continue the rest.
   with a retry and the third `pending` with no request issued, and the retry sent that file first and
   the third only after it succeeded; a single file behaved like a one-item batch; a reload restored
   every chip and status, and the console stayed free of Vue warnings.
+
+## Stage 18 — Multi-provider abstraction (Adapter/Strategy) + model capabilities
+
+The single `AiProviderService` with an internal `switch` (mock + openai-compatible) became a real
+provider platform: the day-7-8 contract's §5 adapter split, the closed error taxonomy, and model
+capabilities — the provider/model core of [day-7-8-decisions.md](architecture/day-7-8-decisions.md).
+Quota/usage, plans, web search and fallback remain separate work packages and were NOT built here.
+
+**Backend**
+- `ai/provider-adapter.ts`: the `ProviderAdapter` interface (`streamChat(history, model, signal)`),
+  the normalized `ProviderEvent` union (`text` / `status` / `usage`) and two shared helpers —
+  `sseDataLines` (SSE `data:` line reader) and `requestSignalWithTimeout` (per-request abort that
+  honors the orchestrator's shutdown signal plus `AI_REQUEST_TIMEOUT_MS`).
+- `ai/provider-errors.ts`: `ProviderError` with the closed kind set (`timeout`, `rate-limit`,
+  `unavailable`, `auth`, `invalid-request`, `invalid-config`, `unknown`) and the shared HTTP-status
+  mapping. Adapters throw only `ProviderError`; the generation loop branches on `kind` only.
+- `ai/adapters/`: `mock` (extracted), `openai-compatible` (extracted verbatim: same request shape,
+  same SSE parsing; usage parsed only when the provider sends it — `stream_options` is deliberately
+  NOT sent for compatibility), and new native `anthropic` (Messages API, `x-api-key` +
+  `anthropic-version: 2023-06-01`, `max_tokens: 4096`; `thinking_delta` and every non-text channel
+  are silently dropped — INV-12) and `google` (Gemini `streamGenerateContent`, `x-goog-api-key`
+  header, `assistant`→`model` role mapping with leading model turns dropped, last `usageMetadata`
+  wins).
+- `AiProviderService` is now the strategy orchestrator: a `Map<AiProviderKind, ProviderAdapter>`;
+  an unknown provider value in the DB fails fast as `invalid-config`; it owns per-request abort +
+  shutdown cleanup. Adding a provider = one adapter class + one map entry.
+- `messages.service.ts` `runGeneration` consumes `ProviderEvent` (text → the unchanged delta path;
+  usage → logged as `ProviderUsage messageId=…`; status → ignored for now) and maps failures: kind
+  `timeout` (or a bare `AbortError`, kept as defense in depth) → the existing timeout Persian
+  sentence, everything else → the existing generic sentence. `errorMessage` on the row keeps the
+  internal detail; client payloads stay safe.
+- `ai_models` gains `capabilities jsonb NOT NULL DEFAULT '[]'` (DB_SYNCHRONIZE dev shortcut) and
+  `AiProviderKind` gains `'anthropic' | 'google'`. Closed set `MODEL_CAPABILITIES = ['web-search',
+  'reasoning']` in `models/model-capabilities.ts`; DTOs validate (`@IsIn`, `each`) and the service
+  normalizes (dedupe + drop-unknown as the second gate). Capabilities ride `SafeModel`, so
+  `GET /models` and the admin endpoints return them without any new endpoint.
+
+**Frontend**
+- `api/types.ts`: provider union + `ModelCapability` + `MODEL_CAPABILITIES` + Persian labels;
+  `AiModel.capabilities`; payloads accept `capabilities`.
+- `ProviderMark.vue`: refactored to a 4-entry identity map (same theme-constant gradient approach,
+  abstract glyphs, no vendor logos) — anthropic terracotta A-frame, google blue→teal spark.
+- `ModelSelector.vue`: provider labels for all kinds + tiny capability glyphs (magnifier / spark)
+  with Persian `title`/`aria-label` on option rows.
+- `AdminModelPanel.vue`: provider cards are data-driven (4 kinds), capability pill toggles
+  (`aria-pressed`, `--accent-soft` ON state), per-provider Model ID / base URL placeholders and
+  API-key labels; payloads wired through `AdminModelsView.vue`. `ModelTable.vue` labels extended.
+
+**Verification**
+- Backend `tsc --noEmit` clean; Jest **224/224** (was 175 — new suites: each adapter vs a fake
+  `fetch` (happy path, malformed lines, usage extraction, every error kind, INV-12 thinking-strip),
+  orchestrator strategy routing + unknown-kind `invalid-config` + shutdown abort, capabilities
+  normalization + provider kinds; messages specs updated to the `ProviderEvent` shape).
+- Frontend `vue-tsc` + production build clean; 7/7 upload-queue checks still pass; Persian/Latin
+  glued-letter sweep clean.
+- Smoke test extended (see below); real Anthropic/Gemini streams need live API keys — adapter wire
+  formats are unit-tested against the documented API shapes and flagged for a key-holding manual pass.
+
+## Stage 19 — Usage tracking, plans & daily quota (Work Package B)
+
+Every accepted chat turn now leaves an auditable, cost-attributed usage row, and
+sends are gated by a pre-stream daily quota per plan — the day-7-8 contract's
+Work Package B, with two deliberate deviations from the contract that the
+product owner's invariants require (both recorded in the amendment inside
+[day-7-8-decisions.md](architecture/day-7-8-decisions.md)): failed turns do NOT
+consume the message quota, and an optional daily token cap is enforced.
+
+**Backend**
+- New `usage/` module: `UsageRecord` entity (`usage_records` per contract §15 —
+  UNIQUE `message_id` is the dedupe anchor, `(user_id, created_at)` index;
+  `outcome ∈ pending|completed|failed|interrupted`), `UsageService` (lifecycle)
+  and `QuotaService` (pre-stream gate). Usage endpoints: `GET /usage/me`,
+  `GET /admin/usage/summary?days=N`; `GET /admin/users` +
+  `PATCH /admin/users/:userId/plan` live in the users module.
+- Lifecycle: the usage row is inserted IN THE SAME TRANSACTION as the user
+  message row (a crash can never leave an accepted turn unrecorded; the unique
+  key makes double-recording structurally impossible — no locks needed). The
+  terminal update runs exactly once after the terminal SSE publish, best-effort:
+  provider-reported tokens (Stage 18 adapters already emit `usage` events) or
+  `chars/4` estimate with `estimated=true`, output chars, cost in Toman from
+  the model's `input/output_price_per_million` (null price ⇒ null cost), and
+  the outcome. Orphaned generations reconcile `outcome='interrupted'` on
+  reconnect; reconnects themselves create/update nothing (INV-7).
+- Quota gate in `assertChatTurnAllowed` (contract order): ownership → fresh
+  `users.plan` read → `resolveChatModel(modelId, plan)` → idempotency (a
+  detected replay skips quota) → `QuotaService.assertQuota` → 429 as clean JSON
+  BEFORE SSE opens. Admins bypass quotas, not model-state checks. The quota
+  COUNT excludes `outcome='failed'` rows; `pending` rows count (in-flight
+  accepted turns consume their slot). The two-simultaneous-sends race remains
+  documented (contract §7.6): the limit may be exceeded by the race width; the
+  unique key prevents unbounded duplication; a reservation table was rejected
+  as premature.
+- `users.plan` (`free|premium`, default free) is read FRESH per request — never
+  from the JWT — so plan changes take effect on the next send. `UserPlan` is
+  now `'free' | 'premium'`; `resolveChatModel`'s existing premium branch is
+  live. Pricing columns on `ai_models` (`numeric(12,6)`, nullable, Toman per
+  1M tokens) are exposed to ADMIN endpoints only (`SafeModel` strips them —
+  INV-14).
+- `total_tokens` is DERIVED (input + output) in responses, never stored — one
+  source of truth for consistent counting.
+
+**Frontend**
+- `useUsage` composable (module singleton, `useAuth` pattern): fetches
+  `GET /usage/me` on mount and re-fetches after every terminal stream event.
+- `AppSidebar` profile block: plan badge (رایگان/پریمیوم) + quota line
+  «پیام‌های امروز: n از m» — the plan always comes from the fresh server
+  response, so an admin plan change is visible without re-login.
+- `MessageComposer` gains a `quotaLocked` prop: when `remaining === 0` Send is
+  locked with an explanatory tooltip; the 429 Persian message surfaces as a
+  toast through the existing client error path (no client.ts changes).
+- New `AdminUsageView` (reuses the admin shell / stat-card / table patterns):
+  totals cards (turns, tokens, estimated cost, failed share), per-day trend
+  table, per-model table (usage + cost) and per-user consumption table with an
+  inline plan toggle (PATCH). Router entry + sidebar menu item («مصرف و
+  هزینه‌ها»).
+- `AdminModelPanel`: optional price inputs (Toman per 1M input/output) wired
+  through the payloads.
+
+**Verification**
+- Backend Jest **257/257** (was 224 — new suites: QuotaService counting rules,
+  UsageService lifecycle/estimate/cost math + best-effort guarantee, UsersService
+  plans, pricing serialization INV-14, and messages wiring: quota called /
+  admin + replay skips / 429 propagation / usage row opened with the user row /
+  never on replay / terminal outcomes / provider token capture). The spec run
+  caught a real bug early: the terminal update initially addressed the
+  ASSISTANT message id instead of the USER row anchor.
+- `tsc --noEmit` clean. `scripts/quota-test.mjs` (new E2E) runs against a
+  backend started with small `QUOTA_FREE_DAILY_MESSAGES=3` /
+  `QUOTA_PREMIUM_DAILY_MESSAGES=5` / `QUOTA_PREMIUM_DAILY_TOKENS=400` and
+  exercises the whole flow end to end: **25/25** (usage/me shape, 429
+  pre-stream with the Persian message, failed-turn-does-not-consume,
+  replay-free retry at exhausted quota, admin bypass, plan upgrade unlocking
+  premium models and raising the limit, the daily TOKEN cap, admin summary
+  with priced-model cost > 0, non-admin 403). Regression suites on the same
+  tree: smoke **85/85**, resilience **28/28**, backend Jest **257/257**,
+  `vue-tsc` + production build clean, Persian glued-letter sweep clean.
+- **Two real bugs the E2E caught** (both fixed): (1) `UsageRecord` was missing
+  from the explicit `entities` array in `database.module.ts` — synchronize
+  never created `usage_records` and every metadata lookup failed
+  (`EntityMetadataNotFoundError`); the explicit list exists because the app
+  does not use `autoLoadEntities`. (2) The contract's `numeric(12,6)` pricing
+  columns overflow on a 1,000,000-Toman-per-1M-tokens price (6 integer digits
+  max) — widened to `numeric(14,6)` (recorded as deviation #4 in the day-7-8
+  amendment). The Jest suite separately caught the terminal usage update
+  addressing the ASSISTANT message id instead of the USER row anchor.
+- Real-provider token reporting is unit-tested via the adapter specs (fake
+  fetch); a live-key pass remains future work as in Stage 18. Frontend visual
+  pass (quota line, composer lock, admin usage view) awaits a session with
+  browser tooling, per repo convention.

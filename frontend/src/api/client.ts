@@ -1,4 +1,14 @@
-import type { AiModel, AuthResponse, ChatFile, Message, SendMessagePayload } from './types';
+import type {
+  AdminUsageSummary,
+  AdminUser,
+  AiModel,
+  AuthResponse,
+  ChatFile,
+  Message,
+  SendMessagePayload,
+  UsageSummary,
+  UserPlan,
+} from './types';
 
 const BASE = 'http://localhost:4000/api';
 const TOKEN_KEY = 'hooshyar.token';
@@ -137,6 +147,26 @@ export async function uploadConversationFile(
 /** Files of one conversation (statuses only — never the extracted text). */
 export function fetchConversationFiles(conversationId: string): Promise<ChatFile[]> {
   return api<ChatFile[]>(`/conversations/${conversationId}/files`);
+}
+
+/** Quota/usage snapshot for the signed-in user (null quota = admin). */
+export function fetchUsageSummary(): Promise<UsageSummary> {
+  return api<UsageSummary>('/usage/me');
+}
+
+/** Consumption & cost overview for the admin panel. */
+export function fetchAdminUsageSummary(days = 7): Promise<AdminUsageSummary> {
+  return api<AdminUsageSummary>(`/admin/usage/summary?days=${days}`);
+}
+
+/** All users for the admin panel (no secrets). */
+export function fetchAdminUsers(): Promise<AdminUser[]> {
+  return api<AdminUser[]>('/admin/users');
+}
+
+/** Changes a user's plan; takes effect on that user's next request. */
+export function setAdminUserPlan(userId: string, plan: UserPlan): Promise<AdminUser> {
+  return api<AdminUser>(`/admin/users/${userId}/plan`, { method: 'PATCH', body: { plan } });
 }
 
 /** Single file status, used to poll a file until it is READY/FAILED. */

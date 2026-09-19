@@ -49,7 +49,7 @@ export class MessagesController {
 
   @Post(':conversationId/messages')
   async sendMessage(
-    @CurrentUser() user: { id: string },
+    @CurrentUser() user: { id: string; role: 'user' | 'admin' },
     @Param('conversationId', ParseUUIDPipe) conversationId: string,
     @Body() dto: SendMessageDto,
     @Req() request: Request,
@@ -63,11 +63,13 @@ export class MessagesController {
         ? request.headers['idempotency-key']
         : undefined);
 
-    // Validate ownership, model availability, idempotency, and attached-file
-    // readiness BEFORE opening the SSE stream, so these errors reach the
-    // client as normal JSON errors. Attachments are resolved here and reused
-    // for this turn's prompt (files are read exactly once).
-    const attachments = await this.messagesService.assertChatTurnAllowed(
+    // Validate ownership, model availability + plan access, idempotency,
+    // attached-file readiness and the caller's daily quota BEFORE opening the
+    // SSE stream, so these errors reach the client as normal JSON errors
+    // (429/403/400). Attachments are resolved here and reused for this turn's
+    // prompt (files are read exactly once); the plan is read once and passed
+    // to beginChatTurn so both halves of the turn see the same plan.
+    const { attachments, plan } = await this.messagesService.assertChatTurnAllowed(
       user.id,
       conversationId,
       dto.modelId,
@@ -76,6 +78,7 @@ export class MessagesController {
         content: dto.content.trim(),
       },
       dto.fileIds,
+      user.role === 'admin',
     );
 
     // Nest defaults POST to 201; an SSE stream is a normal 200 response.
@@ -93,6 +96,7 @@ export class MessagesController {
       dto.modelId,
       clientMessageId,
       attachments,
+      plan,
       dto.webSearch ?? false,
     );
 

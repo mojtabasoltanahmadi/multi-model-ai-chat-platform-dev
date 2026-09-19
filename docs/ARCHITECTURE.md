@@ -14,7 +14,10 @@ backend/src/
 ├── models/          AiModel entity, admin management, chat model resolution
 ├── files/           upload, MinIO storage, validation, BullMQ queue + worker,
 │                    extraction (PDF/Excel/OCR), admin file view
-├── ai/              provider abstraction (mock + openai-compatible)
+├── ai/              provider abstraction: ProviderAdapter strategy map
+│                    (mock, openai-compatible, anthropic, google)
+├── usage/           usage_records lifecycle, daily quota gate, /usage/me,
+│                    admin consumption/cost summary
 ├── common/          guards, decorators, global exception filter
 ├── config/          typed env configuration
 └── database/        TypeORM root module

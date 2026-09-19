@@ -24,9 +24,16 @@ import type { AiModel, ChatFile, ComposerFile, Conversation, Message } from '../
 import { isImageFile } from '../utils/fileKind';
 import { createUploadQueue } from '../utils/uploadQueue';
 import { useToast } from '../composables/useToast';
+import { useUsage } from '../composables/useUsage';
 import { useOnline } from '../composables/useOnline';
 
 const toast = useToast();
+const usage = useUsage();
+
+/** True once /usage/me reports an exhausted (non-admin) daily quota. */
+const quotaExhausted = computed(
+  () => (usage.summary.value?.today.remaining ?? 1) <= 0 && !!usage.summary.value?.quota,
+);
 const { online } = useOnline();
 
 // ---- data ----
@@ -729,6 +736,7 @@ async function send(
       ensureAttachmentPolling();
     }
     void loadConversations(); // refresh titles and ordering
+    void usage.refresh(); // quota line: one cheap fetch per terminal event
   };
 
   streamHandle.value = streamChatMessage(
@@ -1032,6 +1040,7 @@ function onMediaLoad() {
         :request-preview="ensureImagePreview"
         :web-search-enabled="webSearchEnabled"
         :search-status="searchStatus"
+        :quota-locked="quotaExhausted"
         :hint="activeId ? '' : 'ارسال اولین پیام، گفتگو را به‌صورت خودکار می‌سازد.'"
         @send="send"
         @stop="stopStreaming"

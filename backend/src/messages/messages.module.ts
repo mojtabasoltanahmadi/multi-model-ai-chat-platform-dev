@@ -9,6 +9,8 @@ import { ModelsModule } from '../models/models.module';
 import { AiModule } from '../ai/ai.module';
 import { FilesModule } from '../files/files.module';
 import { WebsearchModule } from '../websearch/websearch.module';
+import { UsersModule } from '../users/users.module';
+import { UsageModule } from '../usage/usage.module';
 
 @Module({
   imports: [
@@ -21,6 +23,9 @@ import { WebsearchModule } from '../websearch/websearch.module';
     FilesModule,
     // Opt-in web search behind the provider abstraction (Serper for MVP).
     WebsearchModule,
+    // Plan reads (users) + quota gate and usage lifecycle (usage).
+    UsersModule,
+    UsageModule,
   ],
   controllers: [MessagesController],
   providers: [MessagesService, GenerationRegistry],

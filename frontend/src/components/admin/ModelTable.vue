@@ -3,10 +3,10 @@ import ModelStatus from './ModelStatus.vue';
 import AppSwitch from '../ui/AppSwitch.vue';
 import ProviderMark from '../ui/ProviderMark.vue';
 import { formatFullDate } from '../../utils/format';
-import type { AiModel } from '../../api/types';
+import type { AdminModel, AiProviderKind } from '../../api/types';
 
 interface Props {
-  models: AiModel[];
+  models: AdminModel[];
   /** Row currently open in the configuration panel. */
   selectedId?: string | null;
 }
@@ -14,16 +14,18 @@ interface Props {
 withDefaults(defineProps<Props>(), { selectedId: null });
 
 defineEmits<{
-  edit: [model: AiModel];
-  'set-default': [model: AiModel];
-  'toggle-active': [model: AiModel];
-  'toggle-free': [model: AiModel];
-  remove: [model: AiModel];
+  edit: [model: AdminModel];
+  'set-default': [model: AdminModel];
+  'toggle-active': [model: AdminModel];
+  'toggle-free': [model: AdminModel];
+  remove: [model: AdminModel];
 }>();
 
-const providerLabel: Record<AiModel['provider'], string> = {
+const providerLabel: Record<AiProviderKind, string> = {
   mock: 'ماک',
   'openai-compatible': 'سازگار با OpenAI',
+  anthropic: 'Anthropic (Claude)',
+  google: 'Google Gemini',
 };
 </script>
 
