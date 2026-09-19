@@ -1,6 +1,13 @@
 /** Shared default so the multer interceptor and the service agree on the cap. */
 export const DEFAULT_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 
+/** Parses an optional positive integer env value; unset/invalid ⇒ undefined. */
+export function parseOptionalInt(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 /**
  * Files attachable to one message. Shared by the DTO (boundary validation) and
  * the service (the single gate for AI context) so the two can never disagree.
@@ -30,6 +37,19 @@ export default () => ({
     // How often an in-flight generation flushes partial content to the DB.
     // Bounds the text a crash can lose to roughly one interval of tokens.
     persistIntervalMs: parseInt(process.env.AI_PERSIST_INTERVAL_MS ?? '1500', 10),
+  },
+  // ---- Usage & quota (day-7-8 contract §7) ----
+  // Daily message quota per plan, enforced pre-stream (429 as clean JSON).
+  // These env values ARE the "admin-defined limits" for the MVP: they are
+  // product-tunable per deployment without a settings table or endpoint.
+  quota: {
+    freeDailyMessages: parseInt(process.env.QUOTA_FREE_DAILY_MESSAGES ?? '50', 10),
+    premiumDailyMessages: parseInt(process.env.QUOTA_PREMIUM_DAILY_MESSAGES ?? '500', 10),
+    // Daily token cap per plan (input + output, provider-reported or
+    // chars/4-estimated). Unset ⇒ unlimited — the check is opt-in so default
+    // deployments keep the message-quota-only behavior.
+    freeDailyTokens: parseOptionalInt(process.env.QUOTA_FREE_DAILY_TOKENS),
+    premiumDailyTokens: parseOptionalInt(process.env.QUOTA_PREMIUM_DAILY_TOKENS),
   },
   // ---- File uploads & background processing (Day 5-6) ----
   files: {

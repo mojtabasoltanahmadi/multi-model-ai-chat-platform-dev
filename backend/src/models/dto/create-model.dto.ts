@@ -59,4 +59,16 @@ export class CreateModelDto {
   @IsOptional()
   @IsBoolean({ message: 'وضعیت رایگان باید true یا false باشد.' })
   isFree?: boolean;
+
+  /** Toman per 1M input tokens; empty/0 ⇒ model is not priced (cost null). */
+  @IsOptional()
+  @IsString({ message: 'قیمت ورودی باید عدد باشد.' })
+  @MaxLength(20, { message: 'قیمت ورودی حداکثر ۲۰ کاراکتر است.' })
+  inputPricePerMillion?: string;
+
+  /** Toman per 1M output tokens; empty/0 ⇒ model is not priced (cost null). */
+  @IsOptional()
+  @IsString({ message: 'قیمت خروجی باید عدد باشد.' })
+  @MaxLength(20, { message: 'قیمت خروجی حداکثر ۲۰ کاراکتر است.' })
+  outputPricePerMillion?: string;
 }

@@ -690,3 +690,95 @@ Quota/usage, plans, web search and fallback remain separate work packages and we
   glued-letter sweep clean.
 - Smoke test extended (see below); real Anthropic/Gemini streams need live API keys — adapter wire
   formats are unit-tested against the documented API shapes and flagged for a key-holding manual pass.
+
+## Stage 19 — Usage tracking, plans & daily quota (Work Package B)
+
+Every accepted chat turn now leaves an auditable, cost-attributed usage row, and
+sends are gated by a pre-stream daily quota per plan — the day-7-8 contract's
+Work Package B, with two deliberate deviations from the contract that the
+product owner's invariants require (both recorded in the amendment inside
+[day-7-8-decisions.md](architecture/day-7-8-decisions.md)): failed turns do NOT
+consume the message quota, and an optional daily token cap is enforced.
+
+**Backend**
+- New `usage/` module: `UsageRecord` entity (`usage_records` per contract §15 —
+  UNIQUE `message_id` is the dedupe anchor, `(user_id, created_at)` index;
+  `outcome ∈ pending|completed|failed|interrupted`), `UsageService` (lifecycle)
+  and `QuotaService` (pre-stream gate). Usage endpoints: `GET /usage/me`,
+  `GET /admin/usage/summary?days=N`; `GET /admin/users` +
+  `PATCH /admin/users/:userId/plan` live in the users module.
+- Lifecycle: the usage row is inserted IN THE SAME TRANSACTION as the user
+  message row (a crash can never leave an accepted turn unrecorded; the unique
+  key makes double-recording structurally impossible — no locks needed). The
+  terminal update runs exactly once after the terminal SSE publish, best-effort:
+  provider-reported tokens (Stage 18 adapters already emit `usage` events) or
+  `chars/4` estimate with `estimated=true`, output chars, cost in Toman from
+  the model's `input/output_price_per_million` (null price ⇒ null cost), and
+  the outcome. Orphaned generations reconcile `outcome='interrupted'` on
+  reconnect; reconnects themselves create/update nothing (INV-7).
+- Quota gate in `assertChatTurnAllowed` (contract order): ownership → fresh
+  `users.plan` read → `resolveChatModel(modelId, plan)` → idempotency (a
+  detected replay skips quota) → `QuotaService.assertQuota` → 429 as clean JSON
+  BEFORE SSE opens. Admins bypass quotas, not model-state checks. The quota
+  COUNT excludes `outcome='failed'` rows; `pending` rows count (in-flight
+  accepted turns consume their slot). The two-simultaneous-sends race remains
+  documented (contract §7.6): the limit may be exceeded by the race width; the
+  unique key prevents unbounded duplication; a reservation table was rejected
+  as premature.
+- `users.plan` (`free|premium`, default free) is read FRESH per request — never
+  from the JWT — so plan changes take effect on the next send. `UserPlan` is
+  now `'free' | 'premium'`; `resolveChatModel`'s existing premium branch is
+  live. Pricing columns on `ai_models` (`numeric(12,6)`, nullable, Toman per
+  1M tokens) are exposed to ADMIN endpoints only (`SafeModel` strips them —
+  INV-14).
+- `total_tokens` is DERIVED (input + output) in responses, never stored — one
+  source of truth for consistent counting.
+
+**Frontend**
+- `useUsage` composable (module singleton, `useAuth` pattern): fetches
+  `GET /usage/me` on mount and re-fetches after every terminal stream event.
+- `AppSidebar` profile block: plan badge (رایگان/پریمیوم) + quota line
+  «پیام‌های امروز: n از m» — the plan always comes from the fresh server
+  response, so an admin plan change is visible without re-login.
+- `MessageComposer` gains a `quotaLocked` prop: when `remaining === 0` Send is
+  locked with an explanatory tooltip; the 429 Persian message surfaces as a
+  toast through the existing client error path (no client.ts changes).
+- New `AdminUsageView` (reuses the admin shell / stat-card / table patterns):
+  totals cards (turns, tokens, estimated cost, failed share), per-day trend
+  table, per-model table (usage + cost) and per-user consumption table with an
+  inline plan toggle (PATCH). Router entry + sidebar menu item («مصرف و
+  هزینه‌ها»).
+- `AdminModelPanel`: optional price inputs (Toman per 1M input/output) wired
+  through the payloads.
+
+**Verification**
+- Backend Jest **257/257** (was 224 — new suites: QuotaService counting rules,
+  UsageService lifecycle/estimate/cost math + best-effort guarantee, UsersService
+  plans, pricing serialization INV-14, and messages wiring: quota called /
+  admin + replay skips / 429 propagation / usage row opened with the user row /
+  never on replay / terminal outcomes / provider token capture). The spec run
+  caught a real bug early: the terminal update initially addressed the
+  ASSISTANT message id instead of the USER row anchor.
+- `tsc --noEmit` clean. `scripts/quota-test.mjs` (new E2E) runs against a
+  backend started with small `QUOTA_FREE_DAILY_MESSAGES=3` /
+  `QUOTA_PREMIUM_DAILY_MESSAGES=5` / `QUOTA_PREMIUM_DAILY_TOKENS=400` and
+  exercises the whole flow end to end: **25/25** (usage/me shape, 429
+  pre-stream with the Persian message, failed-turn-does-not-consume,
+  replay-free retry at exhausted quota, admin bypass, plan upgrade unlocking
+  premium models and raising the limit, the daily TOKEN cap, admin summary
+  with priced-model cost > 0, non-admin 403). Regression suites on the same
+  tree: smoke **85/85**, resilience **28/28**, backend Jest **257/257**,
+  `vue-tsc` + production build clean, Persian glued-letter sweep clean.
+- **Two real bugs the E2E caught** (both fixed): (1) `UsageRecord` was missing
+  from the explicit `entities` array in `database.module.ts` — synchronize
+  never created `usage_records` and every metadata lookup failed
+  (`EntityMetadataNotFoundError`); the explicit list exists because the app
+  does not use `autoLoadEntities`. (2) The contract's `numeric(12,6)` pricing
+  columns overflow on a 1,000,000-Toman-per-1M-tokens price (6 integer digits
+  max) — widened to `numeric(14,6)` (recorded as deviation #4 in the day-7-8
+  amendment). The Jest suite separately caught the terminal usage update
+  addressing the ASSISTANT message id instead of the USER row anchor.
+- Real-provider token reporting is unit-tested via the adapter specs (fake
+  fetch); a live-key pass remains future work as in Stage 18. Frontend visual
+  pass (quota line, composer lock, admin usage view) awaits a session with
+  browser tooling, per repo convention.

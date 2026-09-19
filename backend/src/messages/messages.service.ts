@@ -4,7 +4,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Message, MessageStatus } from './message.entity';
 import { ConversationsService } from '../conversations/conversations.service';
-import { ModelsService } from '../models/models.service';
+import { ModelsService, UserPlan } from '../models/models.service';
+import { UsersService } from '../users/users.service';
+import { QuotaService } from '../usage/quota.service';
+import { UsageService } from '../usage/usage.service';
 import { AiProviderService } from '../ai/ai-provider.service';
 import { ProviderError } from '../ai/provider-errors';
 import { GenerationRegistry, GenerationEvent } from './generation.registry';
@@ -88,6 +91,9 @@ export class MessagesService {
     private readonly generationRegistry: GenerationRegistry,
     configService: ConfigService,
     private readonly filesService: FilesService,
+    private readonly usersService: UsersService,
+    private readonly quotaService: QuotaService,
+    private readonly usageService: UsageService,
   ) {
     this.persistIntervalMs = configService.get<number>('ai.persistIntervalMs') ?? 1500;
     this.maxFileContextChars = configService.get<number>('files.maxContextChars') ?? 24000;
@@ -99,10 +105,15 @@ export class MessagesService {
   }
 
   /**
-   * Pre-flight for a chat turn: throws the proper HTTP error (404/400) if the
-   * conversation is unknown/not owned, the model is invalid/inactive, or the
-   * idempotency key collides with a different message body. Runs before the
-   * SSE response starts, so errors reach the client as JSON.
+   * Pre-flight for a chat turn: throws the proper HTTP error (404/400/403/429)
+   * if the conversation is unknown/not owned, the model is invalid/inactive/
+   * not allowed for the caller's plan, the idempotency key collides with a
+   * different message body, or the caller's daily quota is exhausted. Runs
+   * before the SSE response starts, so errors reach the client as JSON.
+   *
+   * Order matters (day-7-8 contract §8/§22.6): idempotency is detected BEFORE
+   * the quota check, so a replayed retry never consumes a slot; admins bypass
+   * quotas entirely (but not model-state checks).
    */
   async assertChatTurnAllowed(
     userId: string,
@@ -110,9 +121,14 @@ export class MessagesService {
     modelId?: string,
     idempotency?: { clientMessageId?: string; content: string },
     fileIds?: string[],
-  ): Promise<AttachedFileContext[]> {
+    isAdmin = false,
+  ): Promise<{ attachments: AttachedFileContext[]; plan: UserPlan }> {
     await this.conversationsService.getOwned(userId, conversationId);
-    await this.modelsService.resolveChatModel(modelId, 'free');
+
+    // The plan is read FRESH from the users table (never from the JWT): an
+    // admin plan change takes effect on the caller's next send.
+    const plan = await this.usersService.getPlan(userId);
+    await this.modelsService.resolveChatModel(modelId, plan);
 
     // Attached files: resolved once here (before any SSE byte is written) so
     // a not-ready/foreign file becomes a normal JSON 400 for the client
@@ -123,6 +139,7 @@ export class MessagesService {
         ? await this.filesService.getReadyContext(conversationId, fileIds)
         : [];
 
+    let isReplay = false;
     if (idempotency?.clientMessageId) {
       const existing = await this.messagesRepository.findOne({
         where: {
@@ -139,9 +156,14 @@ export class MessagesService {
           'این پیام قبلاً با متن دیگری ارسال شده است.',
         );
       }
+      isReplay = Boolean(existing);
     }
 
-    return attachments;
+    if (!isAdmin && !isReplay) {
+      await this.quotaService.assertQuota(userId, plan);
+    }
+
+    return { attachments, plan };
   }
 
   /**
@@ -156,21 +178,31 @@ export class MessagesService {
     modelId: string | undefined,
     clientMessageId: string | undefined,
     attachments: AttachedFileContext[] = [],
+    plan: UserPlan = 'free',
   ): Promise<ChatTurnHandle> {
     const { conversation, messages } =
       await this.conversationsService.getOwnedWithMessages(userId, conversationId);
 
-    const model = await this.modelsService.resolveChatModel(modelId, 'free');
+    const model = await this.modelsService.resolveChatModel(modelId, plan);
 
     // Attachment ids recorded on the user row (null when the turn had none),
     // so a refreshed client can re-render the chips from persisted state.
     const attachedFileIds = attachments.length > 0 ? attachments.map((file) => file.id) : null;
 
+    // The contextual prompt is byte-identical whether built from the caller's
+    // content or the persisted user row (a replay's content was collision-
+    // checked to match), so the input size is known before any row is written.
+    const contextualPrompt = buildContextualPrompt(attachments, content, this.maxFileContextChars);
+    const inputChars =
+      messages.reduce((sum, message) => sum + message.content.length, 0) +
+      contextualPrompt.length;
+
     // ---- Idempotency: reuse the original user row if this is a retry. ----
     // Content-collision with the same clientMessageId was already rejected
     // by assertChatTurnAllowed; if we still find a match here, its content
-    // matches and this is a genuine replay.
-    let userMessage: Message;
+    // matches and this is a genuine replay. Replays NEVER open a usage row —
+    // they reuse the original turn's record (INV-6/7: charged at most once).
+    let userMessage: Message | null = null;
     let replay = false;
     if (clientMessageId) {
       const replayMatch = await this.messagesRepository.findOne({
@@ -183,8 +215,15 @@ export class MessagesService {
       if (replayMatch) {
         userMessage = replayMatch;
         replay = true;
-      } else {
-        userMessage = await this.messagesRepository.save(
+      }
+    }
+
+    if (!userMessage) {
+      // User row + usage row are created ATOMICALLY (one transaction): a
+      // crash can never leave an accepted turn unrecorded, and the unique
+      // message_id makes double-recording structurally impossible.
+      userMessage = await this.messagesRepository.manager.transaction(async (manager) => {
+        const saved = await manager.save(
           this.messagesRepository.create({
             conversationId: conversation.id,
             role: 'user',
@@ -193,17 +232,20 @@ export class MessagesService {
             attachedFileIds,
           }),
         );
-      }
-    } else {
-      userMessage = await this.messagesRepository.save(
-        this.messagesRepository.create({
+        await this.usageService.recordTurnStart(manager, {
+          userId,
           conversationId: conversation.id,
-          role: 'user',
-          content,
-          attachedFileIds,
-        }),
-      );
+          messageId: saved.id,
+          model,
+          inputChars,
+        });
+        return saved;
+      });
     }
+
+    // Narrowed for the closures below (TS cannot see the assignment through
+    // the transaction branch).
+    const turnUserMessage = userMessage as Message;
 
     // First message names the conversation (only on a freshly created user
     // row — never on a retry, which would silently erase the user's title).
@@ -233,7 +275,7 @@ export class MessagesService {
       ...messages.map((message) => ({ role: message.role, content: message.content })),
       {
         role: 'user' as const,
-        content: buildContextualPrompt(attachments, userMessage.content, this.maxFileContextChars),
+        content: contextualPrompt,
       },
     ];
 
@@ -256,7 +298,13 @@ export class MessagesService {
 
     // The generation loop — deliberately not awaited by the caller. It runs
     // to a persisted terminal state whether or not anyone is subscribed.
-    void this.runGeneration(assistantMessage, history, model, completionResolve).catch(
+    void this.runGeneration(
+      assistantMessage,
+      history,
+      model,
+      completionResolve,
+      turnUserMessage.id,
+    ).catch(
       (error) => {
         // runGeneration handles its own failures; this is a last-resort net.
         this.logger.error(
@@ -270,7 +318,7 @@ export class MessagesService {
       // generation events, then exactly one terminal event.
       yield {
         type: 'meta',
-        userMessage,
+        userMessage: turnUserMessage,
         assistantMessage: { ...assistantMessage },
         model,
         replay,
@@ -303,7 +351,7 @@ export class MessagesService {
     }
 
     return {
-      userMessage,
+      userMessage: turnUserMessage,
       assistantMessage,
       model,
       replay,
@@ -323,10 +371,14 @@ export class MessagesService {
     history: { role: 'user' | 'assistant'; content: string }[],
     model: AiModel,
     completionResolve: (message: Message) => void,
+    /** The usage row's anchor: the USER message id (unique per turn). */
+    usageMessageId: string,
   ): Promise<void> {
     const messageId = assistantMessage.id;
     let streamingFlipped = false;
     let lastPersistedAt = 0;
+    // Provider-reported token usage (0–1× per stream, typically last chunk).
+    let providerUsage: { inputTokens: number; outputTokens: number } | null = null;
 
     const persistProgress = async (force: boolean): Promise<void> => {
       const now = Date.now();
@@ -353,11 +405,10 @@ export class MessagesService {
           this.generationRegistry.publishDelta(messageId, event.text);
           await persistProgress(false);
         } else if (event.type === 'usage') {
-          // Token accounting is logged for now; the usage_records lifecycle
-          // is a later work package (day-7-8 contract §7).
-          this.logger.log(
-            `ProviderUsage messageId=${messageId} inTok=${event.inputTokens} outTok=${event.outputTokens}`,
-          );
+          providerUsage = {
+            inputTokens: event.inputTokens,
+            outputTokens: event.outputTokens,
+          };
         }
         // `status` events (execution phases) have no consumer yet — ignored.
       }
@@ -366,6 +417,14 @@ export class MessagesService {
       const saved = await this.messagesRepository.save(assistantMessage);
       this.generationRegistry.publishDone(messageId, saved);
       completionResolve(saved);
+      // Accounting trails the terminal publish so clients are never delayed;
+      // recordTurnEnd is best-effort and never throws (INV-7).
+      await this.usageService.recordTurnEnd(usageMessageId, {
+        outcome: 'completed',
+        inputTokens: providerUsage?.inputTokens ?? null,
+        outputTokens: providerUsage?.outputTokens ?? null,
+        outputChars: assistantMessage.content.length,
+      });
     } catch (error) {
       // Disconnect never lands here — it only unsubscribes. This is a real
       // AI/provider/DB failure, normalized to a ProviderError kind by the
@@ -397,6 +456,14 @@ export class MessagesService {
           : 'سرویس هوش مصنوعی موقتاً در دسترس نیست. لطفاً دوباره تلاش کنید.',
       );
       completionResolve(saved);
+      // Failed turns are still RECORDED (tokens already spent are real) but
+      // are excluded from the quota count — the outcome is the discriminator.
+      await this.usageService.recordTurnEnd(usageMessageId, {
+        outcome: 'failed',
+        inputTokens: providerUsage?.inputTokens ?? null,
+        outputTokens: providerUsage?.outputTokens ?? null,
+        outputChars: assistantMessage.content.length,
+      });
     } finally {
       this.generationRegistry.unregister(messageId);
     }
@@ -457,10 +524,18 @@ export class MessagesService {
     if (!this.generationRegistry.isLive(messageId)) {
       if (message.status === 'pending' || message.status === 'streaming') {
         // Orphaned generation: mark it honestly so the row is retryable and
-        // never looks "completed" while it is not.
+        // never looks "completed" while it is not. The usage row (created at
+        // acceptance) is reconciled to outcome='interrupted' — its partial
+        // output counts, since those tokens were really consumed.
         message.status = 'interrupted';
         message.errorMessage = 'Generation is no longer running (server restart).';
         await this.messagesRepository.save(message);
+        await this.usageService.recordTurnEnd(message.id, {
+          outcome: 'interrupted',
+          inputTokens: null,
+          outputTokens: null,
+          outputChars: message.content.length,
+        });
       }
       yield { type: 'snapshot', assistantMessage: { ...message } };
       if (message.status === 'completed') {

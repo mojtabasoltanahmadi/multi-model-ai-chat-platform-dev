@@ -22,6 +22,32 @@
 > usage/quota, §8 plans, §9 search, §12 fallback and the pricing/fallback
 > columns remain **unimplemented** (their work packages are still open).
 
+> **Implementation status (2026-09-18, Stage 19 — Work Package B):** §7 usage/
+> quota, §8 plans, §15 (users.plan, ai_models pricing, usage_records) and the
+> §16 endpoints (`GET /usage/me`, `PATCH /admin/users/:userId/plan`,
+> `GET /admin/usage/summary`, `GET /admin/users`) have landed. Three
+> deliberate deviations from this contract, agreed with the product owner:
+> 1. **Failed turns do NOT consume the message quota** — the quota count
+>    excludes `outcome='failed'` rows (the original §7.4 charged failed
+>    turns). Tokens/cost of failed turns are still recorded for accounting;
+>    a retry reuses the same usage row, so a turn is quota-charged at most
+>    once (when it produces output). Reason: the product invariant
+>    "failed requests must not incorrectly consume quota" overrides §7.4;
+>    the usage-row design makes this a COUNT filter, not a refund machine.
+> 2. **Optional daily token limit** per plan (`QUOTA_FREE_DAILY_TOKENS` /
+>    `QUOTA_PREMIUM_DAILY_TOKENS`, unset ⇒ unlimited) checked pre-stream —
+>    §7 declared token quotas out of scope; the requirement was re-instated
+>    as an opt-in env cap with the documented retroactive-accounting caveat
+>    (tokens land at terminal, so the check sees last-known totals).
+> 3. **`total_tokens` is derived** (input + output) in API responses, not
+>    stored — one source of truth for the "consistent token counting"
+>    invariant. Also `usage_records.outcome` gains the initial value
+>    `pending` (the contract listed only terminal values).
+> 4. **Pricing precision widened** from `numeric(12,6)` to `numeric(14,6)` —
+>    (12,6) allows only 6 integer digits, so a 1,000,000-Toman-per-1M-tokens
+>    price (a realistic figure) overflows on insert. Caught by the Stage 19
+>    E2E quota test.
+
 ---
 
 ## 1. Purpose

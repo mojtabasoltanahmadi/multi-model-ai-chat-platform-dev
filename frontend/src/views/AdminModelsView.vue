@@ -12,7 +12,7 @@ import AmbientGlow from '../components/ui/AmbientGlow.vue';
 import ModelTable from '../components/admin/ModelTable.vue';
 import AdminModelPanel, { type PanelFormValues } from '../components/admin/AdminModelPanel.vue';
 import { api } from '../api/client';
-import type { AiModel, CreateModelPayload, UpdateModelPayload } from '../api/types';
+import type { AdminModel, CreateModelPayload, UpdateModelPayload } from '../api/types';
 import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
 
@@ -20,14 +20,14 @@ const router = useRouter();
 const auth = useAuth();
 const toast = useToast();
 
-const models = ref<AiModel[]>([]);
+const models = ref<AdminModel[]>([]);
 const loading = ref(true);
 const loadError = ref(false);
-const pendingDelete = ref<AiModel | null>(null);
+const pendingDelete = ref<AdminModel | null>(null);
 const actionBusy = ref(false);
 
 /** 'create' | editing model — controls the configuration panel. */
-const panelState = ref<null | { mode: 'create' } | { mode: 'edit'; model: AiModel }>(null);
+const panelState = ref<null | { mode: 'create' } | { mode: 'edit'; model: AdminModel }>(null);
 const panelModel = computed(() =>
   panelState.value?.mode === 'edit' ? panelState.value.model : null,
 );
@@ -74,7 +74,7 @@ async function load() {
   loading.value = true;
   loadError.value = false;
   try {
-    models.value = await api<AiModel[]>('/admin/models');
+    models.value = await api<AdminModel[]>('/admin/models');
   } catch {
     loadError.value = true;
   } finally {
@@ -86,7 +86,7 @@ function openCreate() {
   panelState.value = { mode: 'create' };
 }
 
-function openEdit(model: AiModel) {
+function openEdit(model: AdminModel) {
   panelState.value = { mode: 'edit', model };
 }
 
@@ -102,6 +102,8 @@ async function submitPanel(values: PanelFormValues) {
         baseUrl: values.baseUrl || undefined,
         apiKey: values.apiKey || undefined,
         capabilities: values.capabilities,
+        inputPricePerMillion: values.inputPricePerMillion || undefined,
+        outputPricePerMillion: values.outputPricePerMillion || undefined,
         isActive: values.isActive,
         isFree: values.isFree,
       };
@@ -117,6 +119,8 @@ async function submitPanel(values: PanelFormValues) {
         baseUrl: values.baseUrl || null,
         ...(values.apiKey ? { apiKey: values.apiKey } : {}),
         capabilities: values.capabilities,
+        inputPricePerMillion: values.inputPricePerMillion || null,
+        outputPricePerMillion: values.outputPricePerMillion || null,
         isActive: values.isActive,
         isFree: values.isFree,
       };
@@ -132,7 +136,7 @@ async function submitPanel(values: PanelFormValues) {
   }
 }
 
-async function setDefault(model: AiModel) {
+async function setDefault(model: AdminModel) {
   actionBusy.value = true;
   try {
     await api(`/admin/models/${model.id}/default`, { method: 'POST' });
@@ -145,12 +149,12 @@ async function setDefault(model: AiModel) {
   }
 }
 
-async function setDefaultFromPanel(model: AiModel) {
+async function setDefaultFromPanel(model: AdminModel) {
   panelState.value = null;
   await setDefault(model);
 }
 
-async function toggleActive(model: AiModel) {
+async function toggleActive(model: AdminModel) {
   actionBusy.value = true;
   try {
     await api(`/admin/models/${model.id}`, {
@@ -165,7 +169,7 @@ async function toggleActive(model: AiModel) {
   }
 }
 
-async function toggleFree(model: AiModel) {
+async function toggleFree(model: AdminModel) {
   actionBusy.value = true;
   try {
     await api(`/admin/models/${model.id}`, {

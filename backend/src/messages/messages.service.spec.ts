@@ -1,9 +1,11 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, HttpException, HttpStatus, NotFoundException } from '@nestjs/common';
 import { GenerationRegistry } from './generation.registry';
 import { MessagesService, ChatStreamEvent, ChatTurnHandle } from './messages.service';
 import { AttachedFileContext } from '../files/files.service';
 import { ProviderEvent } from '../ai/provider-adapter';
 import { ProviderError } from '../ai/provider-errors';
+import { QuotaService } from '../usage/quota.service';
+import { UsageService } from '../usage/usage.service';
 import { createMockRepository } from '../test/mocks';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -23,6 +25,9 @@ describe('MessagesService — chat turn lifecycle', () => {
   let modelsService: { resolveChatModel: jest.Mock };
   let aiProviderService: { streamChat: jest.Mock };
   let filesService: { getReadyContext: jest.Mock };
+  let usersService: { getPlan: jest.Mock };
+  let quotaService: { assertQuota: jest.Mock };
+  let usageService: { recordTurnStart: jest.Mock; recordTurnEnd: jest.Mock };
 
   const setup = ({
     history = [],
@@ -77,6 +82,11 @@ describe('MessagesService — chat turn lifecycle', () => {
     // so no SSE byte is written for a rejected attachment.
     filesService = { getReadyContext: jest.fn().mockResolvedValue(readyFiles) };
 
+    // Plan/quota/usage collaborators default to the permissive path.
+    usersService = { getPlan: jest.fn().mockResolvedValue('free') };
+    quotaService = { assertQuota: jest.fn().mockResolvedValue(undefined) };
+    usageService = { recordTurnStart: jest.fn().mockResolvedValue(undefined), recordTurnEnd: jest.fn().mockResolvedValue(undefined) };
+
     registry = new GenerationRegistry();
     service = new MessagesService(
       messagesRepository as any,
@@ -86,6 +96,9 @@ describe('MessagesService — chat turn lifecycle', () => {
       registry,
       configService as any,
       filesService as any,
+      usersService as any,
+      quotaService as any,
+      usageService as any,
     );
   };
 
@@ -492,7 +505,7 @@ describe('MessagesService — chat turn lifecycle', () => {
       yield text('ok');
     });
 
-    const attachments = await service.assertChatTurnAllowed(
+    const { attachments } = await service.assertChatTurnAllowed(
       'user-1',
       'conv-1',
       undefined,
@@ -548,7 +561,7 @@ describe('MessagesService — chat turn lifecycle', () => {
       yield text('ok');
     });
 
-    const attachments = await service.assertChatTurnAllowed(
+    const { attachments } = await service.assertChatTurnAllowed(
       'user-1',
       'conv-1',
       undefined,
@@ -563,6 +576,149 @@ describe('MessagesService — chat turn lifecycle', () => {
     // Retrying must not create a second user row.
     expect(messagesRepository.saved.filter((row: any) => row.role === 'user')).toHaveLength(0);
   });
+
+  // ---- usage & quota wiring (day-7-8 contract §7) ----
+
+  it('checks the caller quota pre-flight and resolves the model against the fresh plan', async () => {
+    setup();
+    usersService.getPlan.mockResolvedValue('premium');
+
+    await service.assertChatTurnAllowed('user-1', 'conv-1', undefined, {
+      clientMessageId: undefined,
+      content: 'سلام',
+    });
+
+    expect(usersService.getPlan).toHaveBeenCalledWith('user-1');
+    expect(quotaService.assertQuota).toHaveBeenCalledWith('user-1', 'premium');
+    expect(modelsService.resolveChatModel).toHaveBeenCalledWith(undefined, 'premium');
+  });
+
+  it('beginChatTurn resolves the model against the plan handed down from pre-flight', async () => {
+    setup();
+    usersService.getPlan.mockResolvedValue('premium');
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('ok');
+    });
+
+    await begin('user-1', 'conv-1', 'سلام', undefined, undefined, [], 'premium');
+
+    // the second resolve (turn creation) uses the SAME plan, not a hard-code
+    expect(modelsService.resolveChatModel).toHaveBeenLastCalledWith(undefined, 'premium');
+  });
+
+  it('skips the quota check for admins', async () => {
+    setup();
+    await service.assertChatTurnAllowed(
+      'admin-1',
+      'conv-1',
+      undefined,
+      { clientMessageId: undefined, content: 'سلام' },
+      undefined,
+      true,
+    );
+    expect(quotaService.assertQuota).not.toHaveBeenCalled();
+  });
+
+  it('skips the quota check for a replay (same clientMessageId + content)', async () => {
+    setup({ existingUserByClientMid: { id: 'cmid-1', content: 'سلام' } });
+    await service.assertChatTurnAllowed(
+      'user-1',
+      'conv-1',
+      undefined,
+      { clientMessageId: 'cmid-1', content: 'سلام' },
+    );
+    expect(quotaService.assertQuota).not.toHaveBeenCalled();
+  });
+
+  it('propagates a quota 429 from pre-flight as an HTTP exception', async () => {
+    setup();
+    quotaService.assertQuota.mockRejectedValue(
+      new HttpException('سهمیه پیام‌های امروز شما تمام شده است.', HttpStatus.TOO_MANY_REQUESTS),
+    );
+    await expect(
+      service.assertChatTurnAllowed('user-1', 'conv-1', undefined, {
+        clientMessageId: undefined,
+        content: 'سلام',
+      }),
+    ).rejects.toMatchObject({ status: 429 });
+  });
+
+  it('opens a usage row in the same step as the user row (fresh turns only)', async () => {
+    setup();
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('ok');
+    });
+
+    const { handle, done } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
+    await done;
+
+    expect(usageService.recordTurnStart).toHaveBeenCalledTimes(1);
+    const [manager, turn] = usageService.recordTurnStart.mock.calls[0];
+    expect(turn).toMatchObject({
+      userId: 'user-1',
+      conversationId: 'conv-1',
+      messageId: handle.userMessage.id,
+      inputChars: expect.any(Number),
+    });
+    expect(turn.model).toMatchObject({ id: 'model-1' });
+  });
+
+  it('never opens a usage row on a replay (charged at most once)', async () => {
+    setup({ existingUserByClientMid: { id: 'cmid-1', content: 'سلام' } });
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('ok');
+    });
+
+    const { handle, done } = await begin('user-1', 'conv-1', 'سلام', undefined, 'cmid-1');
+    await done;
+
+    expect(handle.replay).toBe(true);
+    expect(usageService.recordTurnStart).not.toHaveBeenCalled();
+    // the terminal outcome still records against the ORIGINAL row
+    expect(usageService.recordTurnEnd).toHaveBeenCalledWith(
+      handle.userMessage.id,
+      expect.objectContaining({ outcome: 'completed' }),
+    );
+  });
+
+  it('records terminal usage with provider-reported tokens', async () => {
+    setup();
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('سلام');
+      yield { type: 'usage', inputTokens: 11, outputTokens: 22 } as ProviderEvent;
+    });
+
+    const { handle, done } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
+    await done;
+
+    // The usage row anchors to the USER message id (unique per turn) — the
+    // terminal update must address the same key the insert used.
+    expect(usageService.recordTurnEnd).toHaveBeenCalledWith(
+      handle.userMessage.id,
+      expect.objectContaining({
+        outcome: 'completed',
+        inputTokens: 11,
+        outputTokens: 22,
+        outputChars: 'سلام'.length,
+      }),
+    );
+  });
+
+  it('records a failed outcome when the provider dies (tokens still real)', async () => {
+    setup();
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('پاسخ ناتمام');
+      throw new ProviderError('unavailable', 503, 'provider down');
+    });
+
+    const { handle, done } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
+    await done;
+
+    expect(usageService.recordTurnEnd).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ outcome: 'failed', outputChars: 'پاسخ ناتمام'.length }),
+    );
+  });
 });
 
 describe('MessagesService — reconnect / recovery', () => {
@@ -573,6 +729,9 @@ describe('MessagesService — reconnect / recovery', () => {
   let modelsService: any;
   let aiProviderService: { streamChat: jest.Mock };
   let filesService: { getReadyContext: jest.Mock };
+  let usersService: { getPlan: jest.Mock };
+  let quotaService: { assertQuota: jest.Mock };
+  let usageService: { recordTurnStart: jest.Mock; recordTurnEnd: jest.Mock };
 
   const setup = ({ history = [] }: { history?: any[] } = {}) => {
     conversationsService = {
@@ -588,6 +747,9 @@ describe('MessagesService — reconnect / recovery', () => {
     };
     messagesRepository = createMockRepository();
     filesService = { getReadyContext: jest.fn().mockResolvedValue([]) };
+    usersService = { getPlan: jest.fn().mockResolvedValue('free') };
+    quotaService = { assertQuota: jest.fn().mockResolvedValue(undefined) };
+    usageService = { recordTurnStart: jest.fn().mockResolvedValue(undefined), recordTurnEnd: jest.fn().mockResolvedValue(undefined) };
     registry = new GenerationRegistry();
     service = new MessagesService(
       messagesRepository as any,
@@ -597,6 +759,9 @@ describe('MessagesService — reconnect / recovery', () => {
       registry,
       { get: () => 60_000 } as any,
       filesService as any,
+      usersService as any,
+      quotaService as any,
+      usageService as any,
     );
   };
 

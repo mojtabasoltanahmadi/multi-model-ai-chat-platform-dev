@@ -8,6 +8,8 @@ import { ConversationsModule } from '../conversations/conversations.module';
 import { ModelsModule } from '../models/models.module';
 import { AiModule } from '../ai/ai.module';
 import { FilesModule } from '../files/files.module';
+import { UsersModule } from '../users/users.module';
+import { UsageModule } from '../usage/usage.module';
 
 @Module({
   imports: [
@@ -18,6 +20,9 @@ import { FilesModule } from '../files/files.module';
     // Attached-file context: only READY files of the same conversation are
     // ever resolved (FilesService enforces both conditions).
     FilesModule,
+    // Plan reads (users) + quota gate and usage lifecycle (usage).
+    UsersModule,
+    UsageModule,
   ],
   controllers: [MessagesController],
   providers: [MessagesService, GenerationRegistry],
