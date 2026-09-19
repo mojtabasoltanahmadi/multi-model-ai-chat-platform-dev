@@ -20,6 +20,21 @@ const routes = [
     component: () => import('../views/ChatView.vue'),
   },
   {
+    // اشتراک و پرداخت: plan cards, payment states, history. Access is still
+    // enforced server-side — this page only displays what the API returns.
+    path: '/subscription',
+    name: 'subscription',
+    component: () => import('../views/SubscriptionView.vue'),
+  },
+  {
+    // Plans / payments / subscriptions / audit management (admin billing).
+    // Route guard is convenience only — the backend enforces @Roles('admin').
+    path: '/admin/billing',
+    name: 'admin-billing',
+    component: () => import('../views/AdminBillingView.vue'),
+    meta: { adminOnly: true },
+  },
+  {
     path: '/admin/models',
     name: 'admin-models',
     component: () => import('../views/AdminModelsView.vue'),

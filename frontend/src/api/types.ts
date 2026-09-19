@@ -292,3 +292,166 @@ export interface SendMessagePayload {
    */
   clientMessageId?: string;
 }
+
+// ---- Billing: plans, payments, subscriptions (day 9-10) ----
+
+export type BillingPeriod = 'monthly' | 'yearly';
+
+export const BILLING_PERIOD_LABELS: Record<BillingPeriod, string> = {
+  monthly: 'ماهانه',
+  yearly: 'سالانه',
+};
+
+/** A purchasable plan — every capability is data, nothing is hard-coded. */
+export interface Plan {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  /** numeric → string over the wire; display with fa-IR formatting. */
+  price: string;
+  currency: string;
+  billingPeriod: BillingPeriod;
+  dailyMessageQuota: number;
+  dailyTokenQuota: number | null;
+  allowedModelIds: string[] | null;
+  webSearch: boolean;
+  thinking: boolean;
+  fileProcessing: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type PaymentStatus = 'pending' | 'success' | 'failed' | 'cancelled';
+
+export const PAYMENT_STATUS_LABELS: Record<PaymentStatus, string> = {
+  pending: 'در انتظار پرداخت',
+  success: 'موفق',
+  failed: 'ناموفق',
+  cancelled: 'لغو شده',
+};
+
+export type SubscriptionStatus = 'pending' | 'active' | 'expired' | 'cancelled';
+
+export const SUBSCRIPTION_STATUS_LABELS: Record<SubscriptionStatus, string> = {
+  pending: 'در انتظار پرداخت',
+  active: 'فعال',
+  expired: 'منقضی شده',
+  cancelled: 'لغو شده',
+};
+
+/** Immutable copy of the plan facts frozen into each payment (INV-07). */
+export interface PlanSnapshot {
+  planId: string;
+  planSlug: string;
+  planName: string;
+  price: string;
+  currency: string;
+  billingPeriod: BillingPeriod;
+}
+
+/** Admin payment row (includes the snapshot + internal fields). */
+export interface AdminPayment {
+  id: string;
+  userId: string;
+  planId: string;
+  amount: string;
+  currency: string;
+  status: PaymentStatus;
+  planSnapshot: PlanSnapshot;
+  trackingId: string;
+  scenario: string | null;
+  failureReason: string | null;
+  succeededAt: string | null;
+  createdAt: string;
+}
+
+/** User-facing payment row (GET /billing/payments). */
+export interface UserPaymentView {
+  id: string;
+  planId: string;
+  amount: string;
+  currency: string;
+  status: PaymentStatus;
+  trackingId: string;
+  failureReason: string | null;
+  createdAt: string;
+  succeededAt: string | null;
+  plan: { slug: string; name: string; billingPeriod: BillingPeriod };
+}
+
+export interface SubscriptionInfo {
+  id: string;
+  planSlug: string;
+  planName: string;
+  status: SubscriptionStatus;
+  currentPeriodStart: string;
+  currentPeriodEnd: string;
+  sourcePaymentId: string | null;
+}
+
+/**
+ * Server-resolved access policy (GET /billing/subscription/me). The backend
+ * derives every capability from this — the UI only displays it.
+ */
+export interface Entitlements {
+  tier: 'free' | 'premium';
+  planSlug: string;
+  planName: string;
+  subscriptionId: string | null;
+  currentPeriodEnd: string | null;
+  quota: { dailyMessages: number; dailyTokens: number | null };
+  features: { webSearch: boolean; thinking: boolean; fileProcessing: boolean };
+  allowedModelIds: string[] | null;
+}
+
+export interface SubscriptionOverview {
+  entitlements: Entitlements;
+  subscription: SubscriptionInfo | null;
+}
+
+export interface SimulateResultRow {
+  status: 'processed' | 'duplicate' | 'ignored';
+  reason?: string;
+}
+
+export interface SimulateResponse {
+  scenario: string;
+  payment: UserPaymentView;
+  results: SimulateResultRow[] | null;
+}
+
+export interface CreatePlanPayload {
+  slug: string;
+  name: string;
+  description?: string | null;
+  price: number;
+  currency: string;
+  billingPeriod: BillingPeriod;
+  dailyMessageQuota: number;
+  dailyTokenQuota?: number | null;
+  allowedModelIds?: string[] | null;
+  webSearch: boolean;
+  thinking: boolean;
+  fileProcessing: boolean;
+}
+
+export type UpdatePlanPayload = Partial<Omit<CreatePlanPayload, 'slug'>>;
+
+export interface AdminSubscriptionRow extends SubscriptionInfo {
+  userId: string;
+  planId: string;
+  createdAt: string;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  eventType: string;
+  actorId: string | null;
+  actor: string | null;
+  target: string | null;
+  correlationId: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+}
