@@ -33,6 +33,13 @@ const routes = [
     component: () => import('../views/AdminFilesView.vue'),
     meta: { adminOnly: true },
   },
+  {
+    // Consumption & cost overview (usage_records aggregation) + plan management.
+    path: '/admin/usage',
+    name: 'admin-usage',
+    component: () => import('../views/AdminUsageView.vue'),
+    meta: { adminOnly: true },
+  },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ];
 
