@@ -79,6 +79,7 @@ export class MessagesController {
       },
       dto.fileIds,
       user.role === 'admin',
+      dto.webSearch ?? false,
     );
 
     // Nest defaults POST to 201; an SSE stream is a normal 200 response.
