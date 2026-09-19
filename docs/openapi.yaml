@@ -8,8 +8,10 @@ info:
     **Base conventions**
 
     * All timestamps are ISO-8601 UTC strings (`format: date-time`).
-    * All ids are UUID v4 strings.
-    * All endpoints require a Bearer JWT **except** `register` and `login`.
+        * All ids are UUID v4 strings, EXCEPT theme ids — stable registry keys
+      (`light` | `dark` | `midnight`) shared with the frontend `data-theme` attribute.
+    * All endpoints require a Bearer JWT **except** `register`, `login`, the
+      payment webhook (HMAC-authenticated) and `GET /themes/available`.
     * JWTs expire after 24 hours. When expired or invalid, every protected
       endpoint returns `401 UNAUTHENTICATED`.
 
@@ -1024,6 +1026,180 @@ paths:
                 items:
                   $ref: '#/components/schemas/AuditLogEntry'
         '403': { description: Caller is not an admin. }
+  # ---- Themes (day: theme management, 2026-09-20) ----
+  /themes/available:
+    get:
+      tags: [themes]
+      summary: Enabled themes in display order (PUBLIC)
+      description: |
+        Public — pre-login pages theme themselves too. Returns the
+        admin-controlled availability list: exactly one row has
+        `isDefault: true` and it is always enabled (service invariant,
+        auto-repaired on boot). Frontends must not hardcode this list.
+      responses:
+        '200':
+          description: Enabled themes ordered by `sortOrder`.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Theme'
+
+  /users/me/preferences:
+    get:
+      tags: [preferences]
+      summary: Server-synced preferences of the caller
+      responses:
+        '200':
+          description: |
+            `themeId: null` = the user never chose a theme (the client keeps
+            its device-local choice). A stored theme that has since been
+            disabled resolves to the system default BEFORE it is returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPreferences'
+        '401': { description: Missing/invalid JWT. }
+
+  /users/me/preferences/theme:
+    patch:
+      tags: [preferences]
+      summary: Store the caller's theme preference
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [themeId]
+              properties:
+                themeId: { type: string, enum: [light, dark, midnight] }
+      responses:
+        '200':
+          description: Stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPreferences'
+        '400': { description: Unknown or currently DISABLED theme — the disabled list is never selectable through the API. }
+        '401': { description: Missing/invalid JWT. }
+
+  /admin/themes:
+    get:
+      tags: [admin-themes]
+      summary: All themes incl. disabled (admin)
+      responses:
+        '200':
+          description: Full theme rows in display order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Theme'
+        '403': { description: Caller is not an admin. }
+
+  /admin/themes/{themeId}:
+    patch:
+      tags: [admin-themes]
+      summary: Edit display metadata (admin)
+      description: '`enabled`/`isDefault` are NOT settable here — dedicated endpoints own their invariants. Unknown ids → 404.'
+      parameters:
+        - name: themeId
+          in: path
+          required: true
+          schema: { type: string, enum: [light, dark, midnight] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateThemePayload'
+      responses:
+        '200':
+          description: Updated row.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Theme'
+        '400': { description: Validation failure. }
+        '403': { description: Caller is not an admin. }
+        '404': { description: Unknown theme id. }
+
+  /admin/themes/{themeId}/status:
+    patch:
+      tags: [admin-themes]
+      summary: Enable or disable a theme (admin)
+      description: |
+        Invariants: at least one theme stays enabled (400 otherwise);
+        disabling the current default auto-moves the default to the first
+        remaining enabled theme within the same call.
+      parameters:
+        - name: themeId
+          in: path
+          required: true
+          schema: { type: string, enum: [light, dark, midnight] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateThemeStatusPayload'
+      responses:
+        '200':
+          description: Updated row (default already re-pointed when applicable).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Theme'
+        '400': { description: Would disable the last enabled theme. }
+        '403': { description: Caller is not an admin. }
+        '404': { description: Unknown theme id. }
+
+  /admin/themes/{themeId}/default:
+    post:
+      tags: [admin-themes]
+      summary: Set the global default theme (admin)
+      description: Transactional swap — exactly one default, and a default is always enabled.
+      parameters:
+        - name: themeId
+          in: path
+          required: true
+          schema: { type: string, enum: [light, dark, midnight] }
+      responses:
+        '200':
+          description: The new default row.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Theme'
+        '400': { description: Theme is disabled — enable it first. }
+        '403': { description: Caller is not an admin. }
+        '404': { description: Unknown theme id. }
+
+  /admin/themes/reorder:
+    post:
+      tags: [admin-themes]
+      summary: Apply a new display order (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReorderThemesPayload'
+      responses:
+        '200':
+          description: All themes in the new order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Theme'
+        '400': { description: List must be a complete permutation of the registry ids (no duplicates, none missing). }
+        '403': { description: Caller is not an admin. }
+
 
 components:
   securitySchemes:
@@ -1852,3 +2028,56 @@ components:
         correlationId: { type: string, nullable: true }
         metadata: { type: object, description: Structured context — never contains secrets or credentials. }
         createdAt: { type: string, format: date-time }
+    Theme:
+      type: object
+      description: |
+        One row per theme in the server-side registry. `id` is a STABLE
+        REGISTRY KEY (not a UUID) shared with the frontend `data-theme`
+        attribute. Availability is admin state; visual definitions live in
+        the frontend registry.
+      required: [id, name, enabled, isDefault, sortOrder]
+      properties:
+        id: { type: string, enum: [light, dark, midnight] }
+        name: { type: string, description: Admin-editable display name (Persian). }
+        description: { type: string, nullable: true }
+        enabled: { type: boolean, description: Users may select this theme; enforced on every read/write path. }
+        isDefault: { type: boolean, description: Exactly one true; always enabled (invariant). }
+        sortOrder: { type: integer, description: Ascending display order. }
+        metadata: { type: object, nullable: true, description: Reserved for per-theme display metadata. }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    UserPreferences:
+      type: object
+      required: [themeId]
+      properties:
+        themeId:
+          type: string
+          nullable: true
+          enum: [light, dark, midnight, null]
+          description: Resolved preference; null = never chosen (client keeps its device-local choice).
+
+    UpdateThemePayload:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, maxLength: 80 }
+        description: { type: string, maxLength: 255, nullable: true }
+        sortOrder: { type: integer, minimum: 0 }
+
+    UpdateThemeStatusPayload:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+
+    ReorderThemesPayload:
+      type: object
+      required: [themeIds]
+      properties:
+        themeIds:
+          type: array
+          items: { type: string, enum: [light, dark, midnight] }
+          minItems: 3
+          maxItems: 3
+          description: Complete ordered list of ALL registry ids — duplicates or partial lists are refused.

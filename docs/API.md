@@ -2,8 +2,8 @@
 
 Base URL: `http://localhost:4000/api` (through the Vite dev proxy: `/api` on port 5200).
 
-All routes require `Authorization: Bearer <token>` **except** the three marked public
-(register/login and the HMAC-signed payment webhook).
+All routes require `Authorization: Bearer <token>` **except** the public ones
+(register/login, the HMAC-signed payment webhook and the theme availability list).
 Validation errors return `400` with `{ "message": string | string[] }`.
 Ownership violations return `404` (resource hidden, not forbidden).
 
@@ -262,6 +262,44 @@ boundary and surfaced in every model response (picker glyphs, admin panel).
 | POST | `/admin/models/:modelId/default` | transactional swap; exactly one default; inactive or non-free models refused (400) |
 | DELETE | `/admin/models/:modelId` | default model deletion refused (400) |
 
+## Themes (public)
+
+Theme availability is admin-controlled server state (the `themes` table, seeded from
+`backend/src/themes/theme-registry.ts`). The frontend never hardcodes which themes
+users may pick; visual definitions (tokens, preview palettes) live in
+`frontend/src/themes/registry.ts` and are keyed by the same stable ids.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/themes/available` | **public** — enabled themes in display order (`{ id, name, description, isDefault, sortOrder }[]`); exactly one `isDefault: true` (invariant, auto-repaired on boot) |
+
+## Preferences (authenticated)
+
+Server-synced user preferences in the `user_preferences` table (one row per user,
+created lazily). A concrete theme choice syncs across devices; the device-local
+`system` preference is never stored server-side.
+
+| Method | Path | Body | Notes |
+|---|---|---|---|
+| GET | `/users/me/preferences` | — | `{ themeId: string \| null }`; `null` = never chosen (client keeps its local choice). A stored theme disabled since selection resolves to the system default before it is returned |
+| PATCH | `/users/me/preferences/theme` | `{ themeId }` | `{ themeId }`; 400 when the theme is unknown or currently disabled — the disabled-theme list is never selectable through the API |
+
+## Admin themes (`role=admin` only)
+
+Ids are stable registry keys (`light` \| `dark` \| `midnight`), not UUIDs; unknown ids → 404.
+Invariants (service-enforced): at least one enabled theme, exactly one default and a
+default is always enabled. Disabling the current default auto-moves the default to the
+first remaining enabled theme; disabling the last enabled theme is refused (400); setting
+a disabled theme as default is refused (400).
+
+| Method | Path | Body | Notes |
+|---|---|---|---|
+| GET | `/admin/themes` | — | all themes in display order (incl. disabled) |
+| PATCH | `/admin/themes/:themeId` | `{ name?, description?, sortOrder? }` | display metadata edits |
+| PATCH | `/admin/themes/:themeId/status` | `{ enabled }` | enable/disable (see invariants above) |
+| POST | `/admin/themes/:themeId/default` | — | transactional swap; exactly one default |
+| POST | `/admin/themes/reorder` | `{ themeIds }` | complete ordered list of ALL registry ids; duplicates/partial lists refused (400) |
+
 ## Usage & quota (authenticated)
 
 One usage row per ACCEPTED chat turn is written atomically with the user
@@ -342,7 +380,7 @@ with `eventType ∈ payment.succeeded | payment.failed | payment.cancelled`.
 
 | Status | Meaning |
 |---|---|
-| 400 | validation failure (empty/long message, bad UUID, inactive model, default-model rule incl. free access, idempotency content collision, file content/MIME/extension mismatch, attached file not `READY` or foreign, illegal file status transition, reprocess of a non-terminal file, invalid plan value) |
+| 400 | validation failure (empty/long message, bad UUID, inactive model, default-model rule incl. free access, idempotency content collision, file content/MIME/extension mismatch, attached file not `READY` or foreign, illegal file status transition, reprocess of a non-terminal file, invalid plan value, theme rules (disabled/last-enabled theme status change, default-ing a disabled theme, bad reorder list, selecting a disabled theme)) |
 | 403 | forbidden (role-gated endpoints; model not allowed for the caller's plan) |
 | 429 | daily quota exhausted pre-stream — messages «سهمیه پیام‌های امروز شما تمام شده است.» or tokens «سهمیه توکن‌های امروز شما تمام شده است.»; admins and idempotent replays are exempt |
 | 401 | missing/invalid/expired JWT; invalid/missing payment-webhook HMAC signature |

@@ -59,7 +59,20 @@ webhook_events(id, event_id, provider, event_type,     UNIQUE (provider, event_i
                                                        processed, ignored, failed}
 audit_logs(id, event_type, actor_id, actor, target,    INSERT-ONLY (INV-08);
       correlation_id, metadata, created_at)            no update/delete path
+themes(id STABLE KEY, name, description,               id ∈ registry keys
+      enabled, is_default, sort_order,                 ('light'/'dark'/'midnight'),
+      metadata, timestamps)                            NOT a UUID; invariants:
+                                                       ≥1 enabled, 1 default,
+                                                       default always enabled
+user_preferences(user_id PK/UUID, theme_id,            one row per user, lazy;
+      timestamps)                                      theme re-validated
+                                                       against availability on read
 ```
+
+`themes` availability and `user_preferences` are pure configuration/state:
+the service layer (not the DB) maintains the default/enabled invariants, and a
+stored `theme_id` that later becomes disabled resolves to the default on read
+(see docs/API.md → Themes / Preferences).
 
 Foreign keys use `ON DELETE CASCADE` from messages→conversations→users, and
 `SET NULL` for message→model (history survives model deletion). The

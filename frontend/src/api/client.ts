@@ -1,11 +1,13 @@
 import type {
   AdminPayment,
   AdminSubscriptionRow,
+  AdminTheme,
   AdminUsageSummary,
   AdminUser,
   AiModel,
   AuditLogEntry,
   AuthResponse,
+  AvailableTheme,
   ChatFile,
   CreatePlanPayload,
   Message,
@@ -13,10 +15,12 @@ import type {
   SendMessagePayload,
   SimulateResponse,
   SubscriptionOverview,
+  UpdateAdminThemePayload,
   UpdatePlanPayload,
   UsageSummary,
   UserPaymentView,
   UserPlan,
+  UserPreferences,
 } from './types';
 
 const BASE = 'http://localhost:4000/api';
@@ -259,6 +263,57 @@ export function fetchAdminAuditLogs(
   if (filters.userId) params.set('userId', filters.userId);
   const query = params.toString();
   return api<AuditLogEntry[]>(`/admin/billing/audit${query ? `?${query}` : ''}`);
+}
+
+// ---- Themes (admin-controlled availability + server-synced preference) ----
+// Which themes exist visually is frontend code; WHICH themes users may pick,
+// their order and the global default are decided here by the backend.
+
+/** Enabled themes in display order (public — pre-login pages theme too). */
+export function fetchAvailableThemes(): Promise<AvailableTheme[]> {
+  return api<AvailableTheme[]>('/themes/available');
+}
+
+export function fetchMyPreferences(): Promise<UserPreferences> {
+  return api<UserPreferences>('/users/me/preferences');
+}
+
+/** Persists the theme choice; the server rejects disabled themes (400). */
+export function updateMyThemePreference(themeId: string): Promise<UserPreferences> {
+  return api<UserPreferences>('/users/me/preferences/theme', {
+    method: 'PATCH',
+    body: { themeId },
+  });
+}
+
+export function fetchAdminThemes(): Promise<AdminTheme[]> {
+  return api<AdminTheme[]>('/admin/themes');
+}
+
+export function updateAdminTheme(
+  themeId: string,
+  payload: UpdateAdminThemePayload,
+): Promise<AdminTheme> {
+  return api<AdminTheme>(`/admin/themes/${themeId}`, { method: 'PATCH', body: payload });
+}
+
+export function setAdminThemeStatus(themeId: string, enabled: boolean): Promise<AdminTheme> {
+  return api<AdminTheme>(`/admin/themes/${themeId}/status`, {
+    method: 'PATCH',
+    body: { enabled },
+  });
+}
+
+export function setAdminThemeDefault(themeId: string): Promise<AdminTheme> {
+  return api<AdminTheme>(`/admin/themes/${themeId}/default`, { method: 'POST' });
+}
+
+/** Full ordered list of theme ids (a complete permutation). */
+export function reorderAdminThemes(themeIds: string[]): Promise<AdminTheme[]> {
+  return api<AdminTheme[]>('/admin/themes/reorder', {
+    method: 'POST',
+    body: { themeIds },
+  });
 }
 
 /** Single file status, used to poll a file until it is READY/FAILED. */

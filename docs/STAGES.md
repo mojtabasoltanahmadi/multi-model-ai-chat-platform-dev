@@ -816,3 +816,59 @@ returned the raw `{snapshot, subscription}` instead of the documented
 `{entitlements, subscription}` shape; git-bash `curl -d` silently mangles
 Persian into literal `?` characters (seed data must be sent via Python/UTF-8
 tooling).
+
+## Stage: Theme Management System — admin-controlled availability, server-synced preferences (2026-09-20, UNCOMMITTED)
+
+Theme availability became backend state. New `backend/src/themes/` (`themes`
+table whose PRIMARY KEY is the stable theme id — `light`/`dark`/`midnight`,
+not a UUID, so it matches the frontend `data-theme` attribute; seed-on-init in
+`ThemesService.onModuleInit` with a default-invariant repair step;
+`GET /themes/available` public; `/admin/themes` list / metadata PATCH /
+status PATCH / set-default POST / reorder POST) and `backend/src/preferences/`
+(`user_preferences` table, one row per user, lazy; `GET /users/me/preferences`
+returns null when unset and re-resolves a stored theme that was disabled since
+through availability before returning it; `PATCH /users/me/preferences/theme`
+validates unknown ids at the DTO boundary AND enabled state in the service).
+Service invariants: at least one enabled theme, exactly one default and a
+default is always enabled, disabling the default auto-moves it to the first
+remaining enabled theme, reorder must be a complete permutation. Frontend:
+`src/themes/registry.ts` (visual metadata + preview palettes only — no
+availability logic), `src/themes/resolver.ts` (pure fallback chain:
+available preference → 'system' target only if enabled → server default →
+first available → 'light'), `useTheme` rework (server availability with a
+full-local-registry fallback until first load; the SERVER preference wins over
+the device-local value on sync; concrete choices sync to the server, 'system'
+stays device-local; local preference snaps to the resolved theme when an admin
+disables it), server-driven `ThemeToggle` (system first + enabled themes with
+preview swatches and a check), and `AdminThemesView` at `/admin/themes`
+(theme cards with `ThemePreviewCard` CSS mini-mockups, enable switches,
+set-default, up/down reorder, preview modal with opt-in live application that
+restores on close) wired into every admin view nav + the sidebar admin menu.
+The Midnight charcoal palette itself already existed in `tokens.css`
+(2026-09-18) and matched the brief's exact hex values — only the management
+layer was new. Docs: `docs/API.md` (Themes / Preferences / Admin themes),
+`docs/openapi.yaml` (8 paths + 5 schemas), `DESIGN_SYSTEM.md` (Theme System
+extension + decision entry), `docs/ARCHITECTURE.md` (data model),
+`README.md` (public-route note).
+
+Verification: backend Jest **369/369** (35 suites; 34 new across
+`themes.service.spec.ts` + `preferences.service.spec.ts`), `nest build`,
+`vue-tsc` + `vite build` clean, `frontend/tests/themeResolve.test.mjs` 11/11.
+Live E2E against real Postgres: API-level **18/18** (user 403s on every admin
+theme endpoint, 400 on selecting a disabled theme, stored-theme → default
+resolution, default auto-move, last-enabled guard, partial/duplicate reorder
+rejection, factory restore) and GUI-level **23 checks** in an isolated Chrome
+profile via CDP (server-driven selector, instant midnight switch without
+reload, cross-device preference sync on login, live fallback when an admin
+disables the selected theme, anonymous login theming). Visual pass: 9 captured
+pages (light/dark-navy/midnight chat, admin page, preview modal, mobile admin
++ chat, login) reviewed — all pass; midnight vs dark-navy verified distinct,
+no orange branding, RTL correct, no mobile horizontal overflow. Zero console
+errors during the whole pass.
+
+Gotchas: the `themes` PK must be varchar (registry key), so `ParseUUIDPipe`
+does not apply — unknown ids are validated in the service (404); Chrome CDP
+WebSocket handshakes need `suppress_origin`; localStorage-only theme overrides
+are silently overridden by the server preference on reload (by design) —
+screenshot passes must set the SERVER preference; the E2E test user was
+deleted from the database afterwards.
