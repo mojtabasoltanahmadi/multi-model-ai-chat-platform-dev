@@ -16,6 +16,8 @@ backend/src/
 │                    extraction (PDF/Excel/OCR), admin file view
 ├── ai/              provider abstraction: ProviderAdapter strategy map
 │                    (mock, openai-compatible, anthropic, google)
+├── usage/           usage_records lifecycle, daily quota gate, /usage/me,
+│                    admin consumption/cost summary
 ├── common/          guards, decorators, global exception filter
 ├── config/          typed env configuration
 └── database/        TypeORM root module
