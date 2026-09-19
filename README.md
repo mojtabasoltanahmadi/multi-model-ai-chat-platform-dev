@@ -105,7 +105,9 @@ node --experimental-strip-types tests/uploadQueue.test.mjs   # 7 composer upload
 ## Security notes
 
 - Passwords are stored as bcrypt hashes; JWTs are required on every route except
-  `/auth/register` and `/auth/login` (secure by default, `@Public()` opt-out).
+  `/auth/register`, `/auth/login` and the payment webhook (the latter is
+  authenticated by an HMAC-SHA256 signature over the raw request body instead;
+  secure by default, `@Public()` opt-out).
 - Conversations/messages are filtered by owner in the query itself; other users' resources
   return 404 (no existence leak).
 - Provider API keys are stored server-side and never returned by any API (`hasApiKey` flag only).
@@ -115,6 +117,11 @@ node --experimental-strip-types tests/uploadQueue.test.mjs   # 7 composer upload
   models, and every chat send re-verifies that the requested (or default) model is active
   and allowed for the caller's plan — hiding models in the UI is never the authorization
   mechanism (see docs/ARCHITECTURE.md → Free-model access & plan authorization).
+- Billing authorization is equally server-side: plan prices and entitlements are resolved
+  from the `plans`/`subscriptions` tables on every request (client-sent money values are
+  ignored), webhook deliveries are HMAC-signed and idempotent, payment history is
+  owner-scoped in the query, and the audit log has no update/delete path
+  (see docs/architecture/day-9-10-billing.md).
 - File ownership is enforced in the query on every read and upload (foreign files and
   conversations are 404, never 403), uploads are validated by content signature rather than by
   trusting the filename or the declared MIME, storage keys are server-generated
@@ -137,4 +144,8 @@ node --experimental-strip-types tests/uploadQueue.test.mjs   # 7 composer upload
   type and the safe error reason)
 - File status updates are polled by the UI, not pushed
 - No regenerate-message action (requires a backend regenerate endpoint)
+- Payments use a built-in gateway simulator (correctly-signed events through the
+  production webhook pipeline); no real provider integration, invoices, refunds or
+  proration yet, and pending payments have no auto-expiry sweeper
+- Subscription expiration is evaluated lazily on entitlement reads (no cron/scheduler)
 - No rate limiting or observability stack — none are needed yet

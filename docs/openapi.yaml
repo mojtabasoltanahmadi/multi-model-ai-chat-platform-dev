@@ -682,6 +682,349 @@ paths:
         '403':
           description: Caller is not an admin.
 
+  # ---- Billing (day 9-10) ----
+  /billing/plans:
+    get:
+      tags: [billing]
+      summary: List active plans
+      responses:
+        '200':
+          description: Active plans, cheapest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Plan'
+        '401': { description: Missing/invalid JWT. }
+
+  /billing/subscription/me:
+    get:
+      tags: [billing]
+      summary: Current entitlements + active subscription
+      description: |
+        The server-resolved access snapshot (INV-05): resolved FRESH from the
+        subscription/plan rows per request, never from the JWT. An overdue
+        period is lazily expired here (INV-06) before it can grant anything.
+        Users without an active subscription get the env-configured free tier.
+      responses:
+        '200':
+          description: Entitlement snapshot + subscription row (null when none).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionOverview'
+        '401': { description: Missing/invalid JWT. }
+
+  /billing/subscription/cancel:
+    post:
+      tags: [billing]
+      summary: Cancel the active subscription (immediate, no proration)
+      responses:
+        '200':
+          description: Fresh entitlements/subscription after cancellation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionOverview'
+        '401': { description: Missing/invalid JWT. }
+
+  /billing/payments:
+    get:
+      tags: [billing]
+      summary: Caller's payment history (newest first)
+      responses:
+        '200':
+          description: Owned payments only.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UserPaymentView'
+        '401': { description: Missing/invalid JWT. }
+    post:
+      tags: [billing]
+      summary: Start a checkout (creates a PENDING payment)
+      description: |
+        The amount/currency are resolved from the Plan row server-side — any
+        client-sent money fields are ignored (anti price manipulation). A
+        second PENDING payment for the same (user, plan) returns the existing
+        one (double-click dedupe; backed by a partial unique index).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [planId]
+              properties:
+                planId: { type: string, format: uuid }
+      responses:
+        '201':
+          description: The (possibly pre-existing) pending payment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPaymentView'
+        '401': { description: Missing/invalid JWT. }
+        '404': { description: Unknown plan. }
+        '409': { description: Plan is deactivated (not purchasable). }
+
+  /billing/payments/{paymentId}:
+    get:
+      tags: [billing]
+      summary: Owned payment detail
+      description: Another user's payment is a 404 — indistinguishable from a missing one (IDOR-safe).
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The payment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPaymentView'
+        '401': { description: Missing/invalid JWT. }
+        '404': { description: Unknown or foreign payment. }
+
+  /billing/payments/{paymentId}/cancel:
+    post:
+      tags: [billing]
+      summary: Abort a pending checkout
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Payment in status `cancelled`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPaymentView'
+        '401': { description: Missing/invalid JWT. }
+        '404': { description: Unknown or foreign payment. }
+        '409': { description: Payment already terminal (state machine). }
+
+  /billing/payments/{paymentId}/simulate:
+    post:
+      tags: [billing]
+      summary: MVP gateway simulator — run a scenario through the real webhook pipeline
+      description: |
+        Produces gateway-shaped, correctly-signed events and feeds them to the
+        same processing pipeline as POST /billing/webhook. To be replaced by a
+        real gateway integration; the webhook contract does not change.
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scenario]
+              properties:
+                scenario:
+                  type: string
+                  enum: [success, failed, cancelled, timeout, duplicate_webhook, retry, out_of_order, unknown]
+      responses:
+        '200':
+          description: Scenario result + the fresh payment state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimulateResponse'
+        '401': { description: Missing/invalid JWT. }
+        '404': { description: Unknown or foreign payment. }
+
+  /billing/webhook:
+    post:
+      tags: [webhook]
+      summary: Payment gateway callback (PUBLIC — HMAC authenticated)
+      description: |
+        Requires an HMAC-SHA256 hex signature over the exact raw request bytes
+        in header `x-hooshyar-signature` (secret PAYMENT_WEBHOOK_SECRET).
+        Idempotency: the (provider, eventId) pair occupies the inbox once —
+        replays answer 200 duplicate with ZERO business effect; concurrent
+        deliveries are serialized by a payment row lock and the state machine.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookPayload'
+      parameters:
+        - name: x-hooshyar-signature
+          in: header
+          required: true
+          schema: { type: string }
+          description: HMAC-SHA256 hex digest of the raw body.
+      responses:
+        '200':
+          description: Acknowledged — status processed | duplicate | ignored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookResult'
+        '400': { description: Malformed body (even with a valid signature). }
+        '401': { description: Invalid or missing signature — nothing is persisted. }
+
+  /admin/billing/plans:
+    get:
+      tags: [admin-billing]
+      summary: List all plans incl. inactive (admin)
+      responses:
+        '200':
+          description: All plans.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Plan'
+        '403': { description: Caller is not an admin. }
+    post:
+      tags: [admin-billing]
+      summary: Create a plan (admin)
+      description: Adding a plan is data entry — no code change. `slug` is immutable after creation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePlanPayload'
+      responses:
+        '201':
+          description: The created plan (active by default).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plan'
+        '403': { description: Caller is not an admin. }
+        '409': { description: Duplicate slug. }
+
+  /admin/billing/plans/{planId}:
+    patch:
+      tags: [admin-billing]
+      summary: Update a plan (admin)
+      description: Price changes affect only FUTURE payments — history keeps its snapshot (INV-07).
+      parameters:
+        - name: planId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePlanPayload'
+      responses:
+        '200':
+          description: Updated plan.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plan'
+        '403': { description: Caller is not an admin. }
+        '404': { description: Unknown plan. }
+
+  /admin/billing/plans/{planId}/activate:
+    post:
+      tags: [admin-billing]
+      summary: Activate a plan (admin)
+      parameters:
+        - name: planId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '201': { description: Plan state after activation. }
+        '403': { description: Caller is not an admin. }
+        '404': { description: Unknown plan. }
+
+  /admin/billing/plans/{planId}/deactivate:
+    post:
+      tags: [admin-billing]
+      summary: Deactivate a plan (admin)
+      description: |
+        Stops new purchases. Existing active subscriptions run to their period
+        end (documented policy) and historical payments are untouched.
+      parameters:
+        - name: planId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '201': { description: Plan state after deactivation. }
+        '403': { description: Caller is not an admin. }
+        '404': { description: Unknown plan. }
+
+  /admin/billing/payments:
+    get:
+      tags: [admin-billing]
+      summary: List payments (admin)
+      parameters:
+        - { name: userId, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { type: string, enum: [pending, success, failed, cancelled] } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+      responses:
+        '200':
+          description: Full payment rows (userId + plan snapshot included).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AdminPayment'
+        '403': { description: Caller is not an admin. }
+
+  /admin/billing/subscriptions:
+    get:
+      tags: [admin-billing]
+      summary: List subscriptions (admin)
+      parameters:
+        - { name: userId, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { type: string, enum: [pending, active, expired, cancelled] } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+      responses:
+        '200':
+          description: Subscription rows, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AdminSubscriptionRow'
+        '403': { description: Caller is not an admin. }
+
+  /admin/billing/audit:
+    get:
+      tags: [admin-billing]
+      summary: Append-only audit trail (admin, read-only)
+      parameters:
+        - { name: eventType, in: query, schema: { type: string, example: payment.succeeded } }
+        - { name: userId, in: query, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+      responses:
+        '200':
+          description: Audit entries, newest first. Metadata never contains secrets.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditLogEntry'
+        '403': { description: Caller is not an admin. }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1304,3 +1647,208 @@ components:
               turns: { type: integer }
               tokens: { type: integer }
               cost: { type: number }
+
+    # ---- Billing (day 9-10) ----
+    Plan:
+      type: object
+      required: [id, slug, name, price, currency, billingPeriod, dailyMessageQuota, webSearch, thinking, fileProcessing, isActive]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string, description: Unique stable identifier; immutable after creation. }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        price: { type: string, description: numeric(14,6) as string; server-authoritative. }
+        currency: { type: string, example: IRT }
+        billingPeriod: { type: string, enum: [monthly, yearly], description: 30/365-day period. }
+        dailyMessageQuota: { type: integer, minimum: 1 }
+        dailyTokenQuota: { type: integer, nullable: true, description: null = unlimited. }
+        allowedModelIds: { type: array, items: { type: string, format: uuid }, nullable: true, description: null = all models allowed. }
+        webSearch: { type: boolean }
+        thinking: { type: boolean }
+        fileProcessing: { type: boolean }
+        isActive: { type: boolean, description: Deactivated = not purchasable; existing subscriptions keep running. }
+
+    PlanSnapshot:
+      type: object
+      description: Plan facts frozen at purchase time (INV-07 historical integrity).
+      required: [planId, planSlug, planName, price, currency, billingPeriod]
+      properties:
+        planId: { type: string, format: uuid }
+        planSlug: { type: string }
+        planName: { type: string }
+        price: { type: string }
+        currency: { type: string }
+        billingPeriod: { type: string, enum: [monthly, yearly] }
+
+    UserPaymentView:
+      type: object
+      required: [id, planId, amount, currency, status, trackingId, plan, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        planId: { type: string, format: uuid }
+        amount: { type: string, description: Server-resolved from the Plan row. }
+        currency: { type: string }
+        status: { type: string, enum: [pending, success, failed, cancelled] }
+        trackingId: { type: string, example: trk_0b9e6c1a-... }
+        failureReason: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        succeededAt: { type: string, format: date-time, nullable: true }
+        plan:
+          type: object
+          properties:
+            slug: { type: string }
+            name: { type: string }
+            billingPeriod: { type: string, enum: [monthly, yearly] }
+
+    AdminPayment:
+      allOf:
+        - $ref: '#/components/schemas/UserPaymentView'
+        - type: object
+          properties:
+            userId: { type: string, format: uuid }
+            planSnapshot:
+              $ref: '#/components/schemas/PlanSnapshot'
+            scenario: { type: string, nullable: true, description: Simulator scenario or 'webhook'/'user-cancelled'. }
+
+    SubscriptionInfo:
+      type: object
+      required: [id, planSlug, planName, status, currentPeriodStart, currentPeriodEnd]
+      properties:
+        id: { type: string, format: uuid }
+        planSlug: { type: string }
+        planName: { type: string }
+        status: { type: string, enum: [pending, active, expired, cancelled] }
+        currentPeriodStart: { type: string, format: date-time }
+        currentPeriodEnd: { type: string, format: date-time }
+        sourcePaymentId: { type: string, format: uuid, nullable: true }
+
+    AdminSubscriptionRow:
+      allOf:
+        - $ref: '#/components/schemas/SubscriptionInfo'
+        - type: object
+          properties:
+            userId: { type: string, format: uuid }
+            planId: { type: string, format: uuid }
+            createdAt: { type: string, format: date-time }
+
+    Entitlements:
+      type: object
+      description: Server-resolved access policy — the ONLY source the backend trusts (INV-05).
+      required: [tier, planSlug, planName, quota, features, allowedModelIds]
+      properties:
+        tier: { type: string, enum: [free, premium] }
+        planSlug: { type: string }
+        planName: { type: string }
+        subscriptionId: { type: string, format: uuid, nullable: true }
+        currentPeriodEnd: { type: string, format: date-time, nullable: true }
+        quota:
+          type: object
+          properties:
+            dailyMessages: { type: integer }
+            dailyTokens: { type: integer, nullable: true }
+        features:
+          type: object
+          properties:
+            webSearch: { type: boolean }
+            thinking: { type: boolean }
+            fileProcessing: { type: boolean }
+        allowedModelIds: { type: array, items: { type: string, format: uuid }, nullable: true }
+
+    SubscriptionOverview:
+      type: object
+      required: [entitlements, subscription]
+      properties:
+        entitlements:
+          $ref: '#/components/schemas/Entitlements'
+        subscription:
+          $ref: '#/components/schemas/SubscriptionInfo'
+          nullable: true
+
+    SimulateResultRow:
+      type: object
+      properties:
+        status: { type: string, enum: [processed, duplicate, ignored] }
+        reason: { type: string, nullable: true }
+
+    SimulateResponse:
+      type: object
+      required: [scenario, payment]
+      properties:
+        scenario: { type: string }
+        payment:
+          $ref: '#/components/schemas/UserPaymentView'
+        results:
+          type: array
+          nullable: true
+          description: One entry per dispatched webhook (null = timeout, no callback).
+          items:
+            $ref: '#/components/schemas/SimulateResultRow'
+
+    WebhookPayload:
+      type: object
+      required: [eventId, eventType, payload]
+      properties:
+        eventId: { type: string, description: Gateway event id — unique per provider (idempotency key). }
+        eventType: { type: string, enum: [payment.succeeded, payment.failed, payment.cancelled] }
+        payload:
+          type: object
+          properties:
+            paymentId: { type: string, format: uuid }
+            trackingId: { type: string }
+            amount: { type: string }
+            currency: { type: string }
+            failureReason: { type: string }
+
+    WebhookResult:
+      type: object
+      required: [received, status]
+      properties:
+        received: { type: boolean, const: true }
+        status: { type: string, enum: [processed, duplicate, ignored] }
+        reason: { type: string, nullable: true, description: Why an event was ignored (stale state / unknown type / missing reference). }
+
+    CreatePlanPayload:
+      type: object
+      required: [slug, name, price, billingPeriod, dailyMessageQuota, webSearch, thinking, fileProcessing]
+      properties:
+        slug: { type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$', minLength: 2, maxLength: 50 }
+        name: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: string, maxLength: 500, nullable: true }
+        price: { type: number, minimum: 0 }
+        currency: { type: string, minLength: 3, maxLength: 10, default: IRT }
+        billingPeriod: { type: string, enum: [monthly, yearly] }
+        dailyMessageQuota: { type: integer, minimum: 1, maximum: 1000000 }
+        dailyTokenQuota: { type: integer, minimum: 1, nullable: true }
+        allowedModelIds: { type: array, items: { type: string, format: uuid }, nullable: true, maxItems: 200 }
+        webSearch: { type: boolean, default: false }
+        thinking: { type: boolean, default: false }
+        fileProcessing: { type: boolean, default: false }
+
+    UpdatePlanPayload:
+      type: object
+      description: Partial; `slug` is deliberately NOT updatable.
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: string, maxLength: 500, nullable: true }
+        price: { type: number, minimum: 0 }
+        currency: { type: string, minLength: 3, maxLength: 10 }
+        billingPeriod: { type: string, enum: [monthly, yearly] }
+        dailyMessageQuota: { type: integer, minimum: 1, maximum: 1000000 }
+        dailyTokenQuota: { type: integer, minimum: 1, nullable: true }
+        allowedModelIds: { type: array, items: { type: string, format: uuid }, nullable: true, maxItems: 200 }
+        webSearch: { type: boolean }
+        thinking: { type: boolean }
+        fileProcessing: { type: boolean }
+
+    AuditLogEntry:
+      type: object
+      required: [id, eventType, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        eventType: { type: string, example: subscription.activated }
+        actorId: { type: string, format: uuid, nullable: true }
+        actor: { type: string, nullable: true, description: Human-readable actor label (email) or null for system/webhook. }
+        target: { type: string, nullable: true, example: payment:7c9e6679-7425-40de-944b-e07fc1f90ae7 }
+        correlationId: { type: string, nullable: true }
+        metadata: { type: object, description: Structured context — never contains secrets or credentials. }
+        createdAt: { type: string, format: date-time }
