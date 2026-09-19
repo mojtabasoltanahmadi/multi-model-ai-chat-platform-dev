@@ -86,6 +86,10 @@ function goModels() {
   void router.push({ name: 'admin-models' });
 }
 
+function goBilling() {
+  void router.push({ name: 'admin-billing' });
+}
+
 function logout() {
   auth.logout();
   void router.push({ name: 'login' });
@@ -106,6 +110,7 @@ function logout() {
       </div>
       <div class="admin__header-actions">
         <AppButton variant="ghost" size="sm" @click="goModels">مدیریت مدل‌ها</AppButton>
+        <AppButton variant="ghost" size="sm" @click="goBilling">مدیریت پرداخت‌ها</AppButton>
         <AppButton variant="ghost" size="sm" @click="goBack">بازگشت به چت</AppButton>
         <AppButton variant="ghost" size="sm" @click="logout">خروج</AppButton>
       </div>
