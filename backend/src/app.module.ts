@@ -9,6 +9,8 @@ import { ModelsModule } from './models/models.module';
 import { FilesModule } from './files/files.module';
 import { UsageModule } from './usage/usage.module';
 import { BillingModule } from './billing/billing.module';
+import { ThemesModule } from './themes/themes.module';
+import { PreferencesModule } from './preferences/preferences.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
@@ -29,6 +31,8 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
     ModelsModule,
     UsageModule,
     BillingModule,
+    ThemesModule,
+    PreferencesModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },

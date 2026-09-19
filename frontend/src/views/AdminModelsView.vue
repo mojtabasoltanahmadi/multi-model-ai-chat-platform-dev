@@ -209,6 +209,10 @@ function goBilling() {
   void router.push({ name: 'admin-billing' });
 }
 
+function goThemes() {
+  void router.push({ name: 'admin-themes' });
+}
+
 function logout() {
   auth.logout();
   void router.push({ name: 'login' });
@@ -250,6 +254,13 @@ function logout() {
               <path d="M2 10h20" />
             </svg>
             مدیریت پرداخت‌ها
+          </button>
+          <button type="button" class="admin-shell__menu-item" @click="goThemes">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path d="m12 3-2.5 6L3 12l6.5 3L12 21l2.5-6L21 12l-6.5-3Z" />
+            </svg>
+            مدیریت پوسته‌ها
           </button>
           <button type="button" class="admin-shell__menu-item" @click="goBack">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

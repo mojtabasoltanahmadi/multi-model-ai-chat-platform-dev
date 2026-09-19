@@ -238,6 +238,10 @@ function goUsage() {
   void router.push({ name: 'admin-usage' });
 }
 
+function goThemes() {
+  void router.push({ name: 'admin-themes' });
+}
+
 function logout() {
   auth.logout();
   void router.push({ name: 'login' });
@@ -309,6 +313,7 @@ const AUDIT_LABELS: Record<string, string> = {
       <div class="abilling__header-actions">
         <AppButton variant="ghost" size="sm" @click="goModels">مدیریت مدل‌ها</AppButton>
         <AppButton variant="ghost" size="sm" @click="goUsage">مصرف و هزینه‌ها</AppButton>
+        <AppButton variant="ghost" size="sm" @click="goThemes">مدیریت پوسته‌ها</AppButton>
         <AppButton variant="ghost" size="sm" @click="goBack">بازگشت به چت</AppButton>
         <AppButton variant="ghost" size="sm" @click="logout">خروج</AppButton>
       </div>

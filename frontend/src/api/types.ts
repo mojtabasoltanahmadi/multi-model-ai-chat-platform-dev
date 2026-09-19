@@ -455,3 +455,34 @@ export interface AuditLogEntry {
   metadata: Record<string, unknown>;
   createdAt: string;
 }
+
+// ---- Themes (availability is server-controlled; the UI never hardcodes it) ----
+
+/** Theme as offered to end users (enabled only; see GET /themes/available). */
+export interface AvailableTheme {
+  id: string;
+  name: string;
+  description: string | null;
+  /** The single global default theme (always enabled). */
+  isDefault: boolean;
+  sortOrder: number;
+}
+
+/** Full theme row as returned by the ADMIN endpoints. */
+export interface AdminTheme extends AvailableTheme {
+  enabled: boolean;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpdateAdminThemePayload {
+  name?: string;
+  description?: string | null;
+  sortOrder?: number;
+}
+
+/** Server-synced user preferences (themeId null = no stored preference). */
+export interface UserPreferences {
+  themeId: string | null;
+}

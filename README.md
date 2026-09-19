@@ -105,9 +105,10 @@ node --experimental-strip-types tests/uploadQueue.test.mjs   # 7 composer upload
 ## Security notes
 
 - Passwords are stored as bcrypt hashes; JWTs are required on every route except
-  `/auth/register`, `/auth/login` and the payment webhook (the latter is
-  authenticated by an HMAC-SHA256 signature over the raw request body instead;
-  secure by default, `@Public()` opt-out).
+  `/auth/register`, `/auth/login`, the payment webhook (authenticated by an
+  HMAC-SHA256 signature over the raw request body instead) and
+  `GET /themes/available` (public: pre-login pages theme themselves; it exposes
+  only enabled-theme display metadata). Secure by default, `@Public()` opt-out.
 - Conversations/messages are filtered by owner in the query itself; other users' resources
   return 404 (no existence leak).
 - Provider API keys are stored server-side and never returned by any API (`hasApiKey` flag only).
