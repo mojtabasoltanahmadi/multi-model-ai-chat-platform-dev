@@ -11,6 +11,7 @@ import { FilesModule } from '../files/files.module';
 import { WebsearchModule } from '../websearch/websearch.module';
 import { UsersModule } from '../users/users.module';
 import { UsageModule } from '../usage/usage.module';
+import { BillingModule } from '../billing/billing.module';
 
 @Module({
   imports: [
@@ -26,6 +27,8 @@ import { UsageModule } from '../usage/usage.module';
     // Plan reads (users) + quota gate and usage lifecycle (usage).
     UsersModule,
     UsageModule,
+    // Subscription/entitlement resolution for the pre-flight gate (INV-05/06).
+    BillingModule,
   ],
   controllers: [MessagesController],
   providers: [MessagesService, GenerationRegistry],

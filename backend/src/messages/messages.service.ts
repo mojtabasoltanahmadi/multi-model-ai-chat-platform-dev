@@ -5,9 +5,9 @@ import { Repository } from 'typeorm';
 import { Message, MessageStatus } from './message.entity';
 import { ConversationsService } from '../conversations/conversations.service';
 import { ModelsService, UserPlan } from '../models/models.service';
-import { UsersService } from '../users/users.service';
 import { QuotaService } from '../usage/quota.service';
 import { UsageService } from '../usage/usage.service';
+import { EntitlementsService } from '../billing/entitlements.service';
 import { AiProviderService } from '../ai/ai-provider.service';
 import { ProviderError } from '../ai/provider-errors';
 import { GenerationRegistry, GenerationEvent } from './generation.registry';
@@ -102,7 +102,7 @@ export class MessagesService {
     configService: ConfigService,
     private readonly filesService: FilesService,
     private readonly webSearchService: WebSearchService,
-    private readonly usersService: UsersService,
+    private readonly entitlementsService: EntitlementsService,
     private readonly quotaService: QuotaService,
     private readonly usageService: UsageService,
   ) {
@@ -133,13 +133,32 @@ export class MessagesService {
     idempotency?: { clientMessageId?: string; content: string },
     fileIds?: string[],
     isAdmin = false,
+    webSearchRequested = false,
   ): Promise<{ attachments: AttachedFileContext[]; plan: UserPlan }> {
     await this.conversationsService.getOwned(userId, conversationId);
 
-    // The plan is read FRESH from the users table (never from the JWT): an
-    // admin plan change takes effect on the caller's next send.
-    const plan = await this.usersService.getPlan(userId);
-    await this.modelsService.resolveChatModel(modelId, plan);
+    // Entitlements are resolved FRESH from the database (subscription + plan
+    // rows — never the JWT, INV-05): a payment, expiry or admin change takes
+    // effect on the caller's next send; an overdue period is expired here
+    // (INV-06) before it can grant anything.
+    const entitlements = await this.entitlementsService.resolveForUser(userId);
+    const model = await this.modelsService.resolveChatModel(modelId, entitlements.tier);
+
+    // Plan-scoped model allowlist (null = all models allowed). Kept separate
+    // from resolveChatModel so the existing free/premium model rules and any
+    // future per-plan catalog both apply on every send.
+    if (entitlements.allowedModelIds !== null && !entitlements.allowedModelIds.includes(model.id)) {
+      throw new ForbiddenException('این مدل در طرح فعلی شما مجاز نیست.');
+    }
+    if (!isAdmin && webSearchRequested && !entitlements.features.webSearch) {
+      throw new ForbiddenException('قابلیت جستجوی وب در طرح فعلی شما فعال نیست.');
+    }
+    if (!isAdmin && model.capabilities.includes('reasoning') && !entitlements.features.thinking) {
+      throw new ForbiddenException('قابلیت تفکر عمیق در طرح فعلی شما فعال نیست.');
+    }
+    if (!isAdmin && fileIds && fileIds.length > 0 && !entitlements.features.fileProcessing) {
+      throw new ForbiddenException('پیوست فایل در طرح فعلی شما فعال نیست.');
+    }
 
     // Attached files: resolved once here (before any SSE byte is written) so
     // a not-ready/foreign file becomes a normal JSON 400 for the client
@@ -171,10 +190,10 @@ export class MessagesService {
     }
 
     if (!isAdmin && !isReplay) {
-      await this.quotaService.assertQuota(userId, plan);
+      await this.quotaService.assertQuota(userId, entitlements.tier, entitlements.quota);
     }
 
-    return { attachments, plan };
+    return { attachments, plan: entitlements.tier };
   }
 
   /**
