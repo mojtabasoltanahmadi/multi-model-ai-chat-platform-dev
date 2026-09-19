@@ -823,6 +823,58 @@ Affected: FileChip.vue, MessageComposer.vue, ChatView.vue, api/client.ts.
 
 ---
 
+# 22a. Billing / Subscription Patterns (Day 9-10)
+
+New page-level patterns introduced by the subscription/payment UI. They reuse
+only existing tokens and primitives (AppButton, AppModal, AppDrawer, AppInput,
+AppSwitch, AppSkeleton, ErrorState); no new tokens were added.
+
+## Plan Cards (`SubscriptionView.vue`)
+
+- Grid of `billing__plan` cards: `repeat(auto-fit, minmax(15rem, 1fr))`,
+  `--surface` background, `--radius-lg`, hairline `--border`, hover lifts the
+  border to `--border-strong`.
+- The subscriber's current plan tints with `--accent-soft` +
+  `--accent-soft-border` (`billing__plan--current`) and its CTA is disabled
+  («طرح فعلی شما»). The purchase CTA is the only `variant="primary"` /
+  gradient element on the card — gradient discipline holds (one CTA per card).
+- Feature lists are plain `<ul>` rows; disabled features use `--text-3` with
+  a «—» marker, enabled ones «✓».
+
+## Current Subscription Card
+
+- Summary card above the plan grid: tier chip uses `--gradient-primary` +
+  `--shadow-glow` for premium, `--accent-soft` pill for free — mirrors the
+  sidebar plan-badge language.
+- Quota/feature facts are small pill chips on `--surface-2` (same chip
+  anatomy as admin filter chips, not semantic status colors).
+
+## Payment Status Badges
+
+Semantic status chips (`billing__status--*`) — the canonical mapping reused by
+the admin tables: `success` → `--success` on `--success-soft`, `pending` →
+`--warning` on `--warning-soft`, `failed` → `--danger` on `--danger-soft`,
+`cancelled`/neutral → `--text-3` on `--surface-3`. Pill radius, 0.75rem,
+weight 600.
+
+## Admin Billing Panel (`AdminBillingView.vue`)
+
+- Section switching reuses the pill filter-chip row from `AdminUsageView`
+  (active chip = `--gradient-primary`); one section visible at a time.
+- Tables follow the existing admin table pattern (white wrap, hairline row
+  borders, `.usage__empty`-style centered empty rows).
+- Plan create/edit uses `AppDrawer` (`size="lg"`) with `AppInput` rows,
+  pill toggle for the billing period and `AppSwitch` for entitlements —
+  same form grammar as `AdminModelPanel`.
+- Destructive/neutral confirmations (deactivate plan, cancel subscription)
+  go through `AppModal size="sm"` with a `variant="danger"`/`primary` confirm.
+
+## Gateway Simulator (MVP)
+
+Inside the payment modal, simulator scenario buttons are small neutral pills
+(`--surface-2`, hover accent border) — deliberately NOT primary actions, so
+the real CTA hierarchy stays readable. To be removed with a real gateway.
+
 # 23. Final Rule
 
 Before adding a new visual pattern, ask: does the project already have one that solves

@@ -2,7 +2,8 @@
 
 Base URL: `http://localhost:4000/api` (through the Vite dev proxy: `/api` on port 5200).
 
-All routes require `Authorization: Bearer <token>` **except** the two marked public.
+All routes require `Authorization: Bearer <token>` **except** the three marked public
+(register/login and the HMAC-signed payment webhook).
 Validation errors return `400` with `{ "message": string | string[] }`.
 Ownership violations return `404` (resource hidden, not forbidden).
 
@@ -289,6 +290,54 @@ kind set (`timeout`, `rate-limit`, `unavailable`, `auth`, `invalid-request`,
 generic); internal detail stays in server logs. A missing API key fails fast
 as `invalid-config` (never retried, no mid-stream surprise).
 
+## Billing (authenticated)
+
+Subscription/payment surface (day 9-10; decisions in `docs/architecture/day-9-10-billing.md`).
+Every price and entitlement is resolved server-side from the `plans`/`subscriptions`
+rows — client-sent money values do not exist in the flow. Users without an active
+subscription are on the env-configured free tier (same limits as before billing).
+
+| Method | Path | Body | Notes |
+|---|---|---|---|
+| GET | `/billing/plans` | — | active plans, cheapest first (`Plan[]`) |
+| GET | `/billing/subscription/me` | — | `{ entitlements, subscription }` — the server-resolved access snapshot (tier, quota, feature flags, model allowlist) + the active subscription row (null when none) |
+| POST | `/billing/subscription/cancel` | — | immediate cancellation → back to free tier; response = fresh `{ entitlements, subscription }` |
+| POST | `/billing/payments` | `{ planId }` | 201 `UserPaymentView` (`pending`). Amount/currency are copied from the Plan row — any client-sent price fields are ignored. A second pending payment for the same (user, plan) returns the existing one (double-click dedupe) |
+| GET | `/billing/payments` | — | caller's payment history, newest first |
+| GET | `/billing/payments/:paymentId` | — | owned payment detail — another user's payment is a 404 (IDOR-safe, no existence leak) |
+| POST | `/billing/payments/:paymentId/cancel` | — | abort a `pending` checkout (terminal states are immutable) |
+| POST | `/billing/payments/:paymentId/simulate` | `{ scenario }` | MVP gateway simulator: `success` `failed` `cancelled` `timeout` `duplicate_webhook` `retry` `out_of_order` `unknown`. Runs signed gateway event(s) through the real webhook pipeline; returns `{ scenario, payment, results }` |
+
+Payment status: `pending → success | failed | cancelled` (explicit state machine;
+terminal states never change — a late webhook on a terminal payment is `ignored`).
+
+## Payment webhook (public)
+
+`POST /billing/webhook` — gateway callback. Authenticated by an **HMAC-SHA256 hex
+signature over the exact raw request bytes** in header `x-hooshyar-signature`
+(shared secret: `PAYMENT_WEBHOOK_SECRET`). Body: `{ eventId, eventType, payload }`
+with `eventType ∈ payment.succeeded | payment.failed | payment.cancelled`.
+
+- forged/unsigned → **401** and the event never touches the database
+- malformed body → **400** (even with a valid signature)
+- first delivery → **200** `{ received: true, status: "processed" }` — the payment
+  transitions AND the subscription activates atomically in one transaction
+- replay (same `eventId`, unique per provider) → **200** `status: "duplicate"`
+  with zero business effect (INV-02/04)
+- unknown event type or stale payment state → **200** `status: "ignored"`
+
+## Admin billing (`role=admin` only)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/admin/billing/plans` | all plans incl. inactive |
+| POST | `/admin/billing/plans` | create (`CreatePlanDto`); `slug` unique + immutable afterwards; 409 duplicate slug |
+| PATCH | `/admin/billing/plans/:planId` | partial update; price changes affect only FUTURE payments (INV-07 snapshot) |
+| POST | `/admin/billing/plans/:planId/activate` / `deactivate` | deactivation stops new purchases (409 on buy); existing subscriptions run to period end; history untouched |
+| GET | `/admin/billing/payments?userId&status&limit` | full payment rows (incl. userId + plan snapshot) |
+| GET | `/admin/billing/subscriptions?userId&status&limit` | subscription overview |
+| GET | `/admin/billing/audit?eventType&userId&limit` | append-only audit trail (no update/delete path exists) |
+
 ## Error semantics
 
 | Status | Meaning |
@@ -296,9 +345,9 @@ as `invalid-config` (never retried, no mid-stream surprise).
 | 400 | validation failure (empty/long message, bad UUID, inactive model, default-model rule incl. free access, idempotency content collision, file content/MIME/extension mismatch, attached file not `READY` or foreign, illegal file status transition, reprocess of a non-terminal file, invalid plan value) |
 | 403 | forbidden (role-gated endpoints; model not allowed for the caller's plan) |
 | 429 | daily quota exhausted pre-stream — messages «سهمیه پیام‌های امروز شما تمام شده است.» or tokens «سهمیه توکن‌های امروز شما تمام شده است.»; admins and idempotent replays are exempt |
-| 401 | missing/invalid/expired JWT |
+| 401 | missing/invalid/expired JWT; invalid/missing payment-webhook HMAC signature |
 | 403 | authenticated but insufficient role — or a model the caller's plan is not allowed to use |
 | 404 | unknown or foreign resource (no existence leak) |
-| 409 | duplicate email on register |
+| 409 | duplicate email on register; duplicate plan slug; purchase of a deactivated plan; state-machine violation on a terminal payment/subscription mutation |
 | 413 | uploaded file exceeds `FILE_MAX_SIZE_BYTES` (rejected by multer before the handler runs) |
 | 500 | unexpected error (clean JSON, details only in server logs) |

@@ -38,6 +38,27 @@ files(id, user_id → users, conversation_id →          status ∈ {UPLOADING,
       conversations, original_name, mime_type,         READY, FAILED}
       size, storage_key, status, extracted_text,
       error_message, attempts, timestamps)             binary lives in MinIO
+plans(id, slug UNIQUE, name, price, currency,          capabilities are DATA:
+      billing_period, daily_message_quota,            web_search / thinking /
+      daily_token_quota, allowed_model_ids,           file_processing flags +
+      web_search, thinking, file_processing,          allowed_model_ids (null = all)
+      is_active, timestamps)
+subscriptions(id, user_id → users, plan_id,            status ∈ {pending, active,
+      plan_slug, plan_name, current_period_start,      expired, cancelled}
+      current_period_end, source_payment_id, …)        ONE active per user:
+                                                       partial UNIQUE (user_id)
+                                                       WHERE status='active'
+payments(id, user_id → users, plan_id, amount,        status ∈ {pending, success,
+      currency, status, plan_snapshot (jsonb),          failed, cancelled}
+      tracking_id UNIQUE, scenario, failure_reason,    ONE pending per
+      succeeded_at, timestamps)                        (user, plan): partial
+                                                       UNIQUE WHERE status='pending'
+webhook_events(id, event_id, provider, event_type,     UNIQUE (provider, event_id)
+      payload, status, ignore_reason, error,
+      received_at, processed_at)                       status ∈ {received,
+                                                       processed, ignored, failed}
+audit_logs(id, event_type, actor_id, actor, target,    INSERT-ONLY (INV-08);
+      correlation_id, metadata, created_at)            no update/delete path
 ```
 
 Foreign keys use `ON DELETE CASCADE` from messages→conversations→users, and
@@ -170,6 +191,32 @@ seams it relies on:
   `Idempotency-Key` HTTP header) makes the POST safely retryable. Reused
   ids with matching content produce a replay (same user row, new assistant
   row); mismatched content is rejected with 400 in pre-flight.
+
+## Billing & entitlement authorization
+
+The subscription/payment subsystem (`src/billing/`, day 9-10) owns what a user
+may do. `EntitlementsService.resolveForUser` is the single chokepoint: it
+resolves FRESH from `subscriptions` + `plans` on every request (never the JWT)
+and returns the tier, quotas, feature flags and optional model allowlist. The
+chat pre-flight gate enforces it (403 per capability + allowlist), the quota
+gate consumes its limits, and `/usage/me` reports it. A user without an active
+subscription is on the env-configured free tier — pre-billing behavior
+unchanged. `users.plan` ('free' | 'premium') is only a denormalized DISPLAY
+flag kept in sync by billing events; nothing authorizes against it.
+
+Money never comes from the client: `POST /billing/payments` copies
+amount/currency from the Plan row and freezes a `plan_snapshot` jsonb into the
+payment (INV-07 — admin price changes never rewrite history). The public
+webhook (`POST /billing/webhook`) authenticates by HMAC-SHA256 over the raw
+request bytes; processing is one transaction: insert into `webhook_events`
+(unique `(provider, event_id)` — a duplicate loses the race with zero business
+effect, INV-02/04) → `SELECT payment FOR UPDATE` → payment state machine
+(`pending → success | failed | cancelled`, terminal states immutable) →
+subscription activation (previous active row cancelled, new active row; ONE
+active per user is also enforced by a partial unique index, INV-01) → audit
+rows. Expiration is lazy: an overdue active period is expired transactionally
+on the next entitlement read (INV-06). Full decisions:
+`docs/architecture/day-9-10-billing.md`.
 
 ## Deliberate MVP trade-offs
 

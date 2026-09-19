@@ -782,3 +782,37 @@ consume the message quota, and an optional daily token cap is enforced.
   fetch); a live-key pass remains future work as in Stage 18. Frontend visual
   pass (quota line, composer lock, admin usage view) awaits a session with
   browser tooling, per repo convention.
+
+
+## Stage: Day 9-10 — Subscription / Payment subsystem (2026-09-19, UNCOMMITTED)
+
+Full commercialization scope in new `backend/src/billing/`: admin-managed plans
+(no hard-coded plan logic anywhere), payment state machine, gateway simulator,
+HMAC webhook pipeline with an inbox unique on (provider, eventId), atomic
+subscription activation, lazy expiration, entitlement-based access enforcement,
+payment history, append-only audit log, and the `admin/billing` management
+surface. Decisions + policies: `docs/architecture/day-9-10-billing.md`
+(supersedes the day-7-8 "no billing" non-goal; `users.plan` remains only as a
+display flag kept in sync by billing events). Frontend: `/subscription`
+(plan cards, checkout modal with simulator scenarios, payment history) and
+`/admin/billing` (plans / payments / subscriptions / audit tabs + plan drawer);
+documented in `DESIGN_SYSTEM.md` §22a. API reference: `docs/API.md` and
+`docs/openapi.yaml` (15 new paths, 15 schemas).
+
+Verification: backend Jest **335/335** (33 suites; ~50 new billing tests),
+`nest build` + `vue-tsc`/vite build clean, `scripts/billing-test.mjs` (new
+E2E, quota-test style) **28/28** against a live backend (purchase → webhook →
+activation → entitlements → /usage/me; replay/forged/unsigned/unknown webhooks;
+double-click dedupe; upgrade supersession; deactivated-plan policy; IDOR;
+admin guard; audit coverage). Visual pass: subscription + admin billing pages
+captured via headless-Chrome CDP (`scripts/capture-billing.cjs`) and reviewed
+against the design system — all pass in the light theme.
+
+Real bugs the E2E/visual passes caught (all fixed): `allowed_model_ids` jsonb
+column had to be nullable (null = all models); the admin payments endpoint
+returned the user-shaped DTO (no `userId`) which crashed the admin table render
+(`payment.userId.slice` of undefined); `POST /billing/subscription/cancel`
+returned the raw `{snapshot, subscription}` instead of the documented
+`{entitlements, subscription}` shape; git-bash `curl -d` silently mangles
+Persian into literal `?` characters (seed data must be sent via Python/UTF-8
+tooling).

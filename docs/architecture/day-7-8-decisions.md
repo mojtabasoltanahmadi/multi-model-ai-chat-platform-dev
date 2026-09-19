@@ -809,6 +809,9 @@ Not in Day 7–8 — do not build, scaffold or "prepare for" any of these:
   deployments for chat, service meshes, multi-region anything.
 - Billing, payments, invoices, subscriptions, Stripe-like integration,
   wallets. Plans are admin-set flags, nothing more.
+  (SUPERSEDED on Day 9-10: the subscription/payment subsystem now lives in
+  `src/billing/` — see `day-9-10-billing.md`. The users.plan flag remains as
+  a denormalized display field.)
 - Real-time token meters, streaming quota countdowns, per-token quotas.
 - Provider-native tool calling / function calling (search is platform-side by
   design — §9).

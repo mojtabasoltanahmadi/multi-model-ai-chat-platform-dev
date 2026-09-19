@@ -33,5 +33,4 @@ coverage/
 # OCR language data downloaded at runtime
 *.traineddata
 
-
 .captures/
