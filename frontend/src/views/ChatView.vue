@@ -107,6 +107,12 @@ watch(sidebarCollapsed, (value) => {
   }
 });
 
+/** Opt-in web search for the next turn; always starts off. */
+type SearchStatus = { phase: 'searching' | 'succeeded'; resultCount: number } | null;
+const webSearchEnabled = ref(false);
+/** Live search progress of the in-flight turn (null when idle). */
+const searchStatus = ref<SearchStatus>(null);
+
 /** Last-opened conversation id; restored on refresh so the user lands back where they were. */
 const ACTIVE_CONV_KEY = 'hooshyar.active-conversation';
 function readActiveConversationPreference(): string | null {
@@ -230,6 +236,7 @@ async function selectConversation(id: string) {
   activeId.value = id;
   error.value = '';
   pinnedToBottom.value = true;
+  webSearchEnabled.value = false;
   await loadMessages();
 }
 
@@ -290,6 +297,7 @@ function startNewConversation() {
   attachments.value = [];
   viewerFile.value = null;
   pinnedToBottom.value = true;
+  webSearchEnabled.value = false;
   releasePreviews();
   uploadQueue.reset();
 }
@@ -630,7 +638,13 @@ function newClientMessageId(): string {
 
 async function send(
   content: string,
-  options: { clientMessageId?: string; existingUserRowId?: string; fileIds?: string[] } = {},
+  options: {
+    clientMessageId?: string;
+    existingUserRowId?: string;
+    fileIds?: string[];
+    /** Overrides the composer toggle (retry re-searches a searched turn). */
+    webSearch?: boolean;
+  } = {},
 ) {
   if (streaming.value) return;
   error.value = '';
@@ -676,6 +690,8 @@ async function send(
     // Files used for this turn, so the chips show immediately (the persisted
     // row returns the same ids via the meta event).
     attachedFileIds: fileIds.length > 0 ? fileIds : null,
+    // Sources arrive with the terminal event; history rows carry their own.
+    sources: null,
     createdAt: new Date().toISOString(),
   };
   const placeholder: Message = {
@@ -688,6 +704,7 @@ async function send(
     modelId: null,
     clientMessageId: null,
     attachedFileIds: null,
+    sources: null,
     createdAt: new Date().toISOString(),
   };
   // A retry (manual or auto) reuses the user row already on screen — pushing
@@ -704,11 +721,14 @@ async function send(
   await scrollToBottom();
 
   let accumulated = '';
+  const webSearch = options.webSearch ?? webSearchEnabled.value;
+
   const finish = () => {
     streaming.value = false;
     streamHandle.value = null;
     activeStreamRowId.value = null;
     inflightClientMessageId.value = null;
+    searchStatus.value = null;
     // Sent files are now part of the message; only unfinished ones stay
     // attached for the next turn.
     if (fileIds.length > 0) {
@@ -726,8 +746,18 @@ async function send(
       modelId: selectedModelId.value || undefined,
       clientMessageId,
       fileIds,
+      webSearch,
     },
     {
+      onSearchStarted: () => {
+        searchStatus.value = { phase: 'searching', resultCount: 0 };
+      },
+      onSearchCompleted: ({ resultCount, warning }) => {
+        searchStatus.value = { phase: 'succeeded', resultCount };
+        // Degraded turn: the answer below was produced WITHOUT web
+        // context — say so once instead of failing the turn.
+        if (warning) toast.error(warning);
+      },
       onMeta: (meta) => {
         const optimistic = messages.value.find((m) => m.id === optimisticUser.id);
         if (optimistic) Object.assign(optimistic, meta.userMessage);
@@ -858,10 +888,13 @@ function retry(message: Message) {
   // replay — one user row, one fresh assistant row.
   // The turn's own attachments, not the composer's pending files: retrying a
   // failed answer must not quietly drop the files it was asked about.
+  // A turn that cited web sources re-searches (fresh results, same ids);
+  // anything else follows the composer's current toggle.
   void send(userRow.content, {
     clientMessageId: userRow.clientMessageId ?? undefined,
     existingUserRowId: userRow.id,
     fileIds: userRow.attachedFileIds ?? [],
+    webSearch: (message.sources?.length ?? 0) > 0 ? true : webSearchEnabled.value,
   });
 }
 
@@ -879,6 +912,7 @@ function detachStream() {
   streaming.value = false;
   activeStreamRowId.value = null;
   inflightClientMessageId.value = null;
+  searchStatus.value = null;
 }
 
 function stopStreaming() {
@@ -896,6 +930,7 @@ function stopStreaming() {
   streamHandle.value = null;
   activeStreamRowId.value = null;
   inflightClientMessageId.value = null;
+  searchStatus.value = null;
   void loadConversations();
 }
 
@@ -1003,6 +1038,8 @@ function onMediaLoad() {
         :attachments="attachments"
         :previews="previews"
         :request-preview="ensureImagePreview"
+        :web-search-enabled="webSearchEnabled"
+        :search-status="searchStatus"
         :quota-locked="quotaExhausted"
         :hint="activeId ? '' : 'ارسال اولین پیام، گفتگو را به‌صورت خودکار می‌سازد.'"
         @send="send"
@@ -1012,6 +1049,7 @@ function onMediaLoad() {
         @retry-upload="retryUpload"
         @open-file="openFile"
         @update:model-id="selectedModelId = $event"
+        @update:web-search-enabled="webSearchEnabled = $event"
       />
 
       <FileViewerModal

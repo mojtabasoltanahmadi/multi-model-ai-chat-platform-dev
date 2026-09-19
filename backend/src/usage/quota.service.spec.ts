@@ -68,7 +68,9 @@ describe('QuotaService', () => {
     });
     await expect(svc.assertQuota('user-1', 'premium')).resolves.toBeUndefined();
     // the COUNT ran against the user + day window + outcome filter
-    expect(qb.where).toHaveBeenCalledWith('usage.user_id = :userId', { userId: 'user-1' });
+    // (QueryBuilder takes entity property names and maps them to the
+    // quoted snake_case columns itself — see QuotaService.snapshotFor).
+    expect(qb.where).toHaveBeenCalledWith('usage.userId = :userId', { userId: 'user-1' });
   });
 
   it('snapshotFor reports used/remaining/tokens with failed turns excluded', async () => {
@@ -78,7 +80,7 @@ describe('QuotaService', () => {
     // failed turns are filtered out of the quota count
     expect(qb.andWhere).toHaveBeenCalledWith('usage.outcome != :failed', { failed: 'failed' });
     // and the window starts at UTC midnight
-    expect(qb.andWhere).toHaveBeenCalledWith('usage.created_at >= :startOfDay', {
+    expect(qb.andWhere).toHaveBeenCalledWith('usage.createdAt >= :startOfDay', {
       startOfDay: startOfUtcDay(),
     });
   });

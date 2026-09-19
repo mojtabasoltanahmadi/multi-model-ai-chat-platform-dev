@@ -796,6 +796,20 @@ Stop still marks its row `interrupted`.
 Date:     2026-09-18
 Affected: ChatView.vue.
 
+Decision: Web search toggle lives in the composer toolbar (globe + «جستجوی وب»
+label, accent-soft active state, `aria-pressed`); progress reuses the existing
+composer status line («در حال جستجو در وب…» → «N منبع پیدا شد • در حال تولید
+پاسخ…»); citations render as a `MessageSources` card list under the assistant
+answer (numbered badge + ellipsized title + LTR mono domain, `target=_blank
+rel=noopener`, unsafe URLs filtered client-side too)
+Reason:   Search is a per-turn composer concern next to the model picker, not a
+page; the status line already owns "what is loading" feedback; sources are
+content metadata of the answer they cite, so they sit with the message and
+persist through history without re-searching.
+Date:     2026-09-18
+Affected: MessageComposer.vue, MessageSources.vue (new), MessageItem.vue,
+          ChatView.vue, utils/urlSafety.ts (new).
+
 Decision: Chip status is an icon, never a word, and a message carries at most six chips
 Reason:   Chips sit inside the message box the user is typing in, so every word spent on
           «آماده» / «در حال آپلود…» costs space the draft needs: the words moved into the tooltip

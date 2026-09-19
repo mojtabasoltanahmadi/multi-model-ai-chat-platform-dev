@@ -9,6 +9,7 @@ import {
 } from 'typeorm';
 import { Conversation } from '../conversations/conversation.entity';
 import { AiModel } from '../models/ai-model.entity';
+import type { MessageSource } from '../websearch/websearch.types';
 
 export type MessageRole = 'user' | 'assistant';
 
@@ -89,6 +90,15 @@ export class Message {
    */
   @Column({ name: 'attached_file_ids', type: 'jsonb', nullable: true })
   attachedFileIds: string[] | null;
+
+  /**
+   * Web search sources cited by THIS assistant turn (null on user rows and
+   * on turns answered without search). Persisted so history reloads render
+   * citations without re-running a search (search runs only for new turns
+   * with webSearch=true).
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  sources: MessageSource[] | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

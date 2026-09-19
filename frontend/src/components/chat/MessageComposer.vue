@@ -7,10 +7,19 @@ import type { AiModel, ChatFile, ComposerFile } from '../../api/types';
 
 const MAX_LENGTH = 4000;
 
+/** Live web-search progress of the in-flight turn (null when idle). */
+export interface SearchStatus {
+  phase: 'searching' | 'succeeded';
+  resultCount: number;
+}
+
 interface Props {
   models: AiModel[];
   modelId: string;
   streaming: boolean;
+  /** Opt-in web search for the next turn (persisted by the view). */
+  webSearchEnabled?: boolean;
+  searchStatus?: SearchStatus | null;
   /** Files added to the next message, each with its own upload state. */
   attachments?: ComposerFile[];
   /** Object URLs for image thumbnails, keyed by file id. */
@@ -31,11 +40,14 @@ const props = withDefaults(defineProps<Props>(), {
   attachments: () => [],
   previews: () => ({}),
   requestPreview: undefined,
+  webSearchEnabled: false,
+  searchStatus: null,
 });
 const emit = defineEmits<{
   send: [content: string];
   stop: [];
   'update:modelId': [id: string];
+  'update:webSearchEnabled': [enabled: boolean];
   attach: [files: File[]];
   'remove-attachment': [fileId: string];
   'retry-upload': [fileId: string];
@@ -87,6 +99,22 @@ const sendLockReason = computed(() => {
 function pickFiles() {
   fileInput.value?.click();
 }
+
+function toggleWebSearch() {
+  if (props.disabled || props.streaming) return;
+  emit('update:webSearchEnabled', !props.webSearchEnabled);
+}
+
+/** Single status line under the box: searching outranks generating. */
+const statusText = computed(() => {
+  if (props.searchStatus?.phase === 'searching') return 'در حال جستجو در وب…';
+  if (!props.streaming) return '';
+  if (props.searchStatus?.phase === 'succeeded') {
+    const count = props.searchStatus.resultCount.toLocaleString('fa-IR');
+    return `${count} منبع پیدا شد • در حال تولید پاسخ…`;
+  }
+  return 'در حال تولید پاسخ…';
+});
 
 function onFilesChosen(event: Event) {
   const input = event.target as HTMLInputElement;
@@ -205,6 +233,24 @@ defineExpose({ focus: () => textarea.value?.focus() });
           @select="emit('update:modelId', $event)"
         />
 
+        <button
+          type="button"
+          class="composer__search-toggle"
+          :class="{ 'composer__search-toggle--active': webSearchEnabled }"
+          :disabled="disabled || streaming"
+          :aria-pressed="webSearchEnabled"
+          :aria-label="webSearchEnabled ? 'جستجوی وب فعال است؛ برای خاموش کردن بزنید' : 'جستجوی وب خاموش است؛ برای فعال کردن بزنید'"
+          :title="webSearchEnabled ? 'جستجوی وب فعال' : 'جستجوی وب'"
+          @click="toggleWebSearch"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M3 12h18" />
+            <path d="M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3Z" />
+          </svg>
+          <span class="composer__search-label">جستجوی وب</span>
+        </button>
+
         <span class="composer__toolbar-spacer"></span>
 
         <span
@@ -244,9 +290,9 @@ defineExpose({ focus: () => textarea.value?.focus() });
     </div>
 
     <div class="composer__under">
-      <span v-if="streaming" class="composer__status">
+      <span v-if="statusText" class="composer__status" role="status" aria-live="polite">
         <span class="composer__status-dot" aria-hidden="true"></span>
-        در حال تولید پاسخ…
+        {{ statusText }}
       </span>
     </div>
   </div>
@@ -354,6 +400,50 @@ defineExpose({ focus: () => textarea.value?.focus() });
 .composer__attach:disabled {
   color: var(--text-disabled);
   cursor: not-allowed;
+}
+
+.composer__search-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  height: 2.2rem;
+  padding-inline: 0.6rem;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-3);
+  font-size: 0.75rem;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out);
+}
+
+.composer__search-toggle:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text-1);
+}
+
+.composer__search-toggle:disabled {
+  color: var(--text-disabled);
+  cursor: not-allowed;
+}
+
+.composer__search-toggle--active {
+  background: var(--accent-soft);
+  border-color: var(--accent-soft-border);
+  color: var(--text-on-accent-soft);
+}
+
+.composer__search-toggle--active:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--text-on-accent-soft);
+  filter: brightness(1.05);
+}
+
+.composer__search-label {
+  white-space: nowrap;
 }
 
 .composer__counter {

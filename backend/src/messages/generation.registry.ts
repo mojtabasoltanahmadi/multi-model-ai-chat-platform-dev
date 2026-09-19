@@ -5,12 +5,17 @@ import type { Message } from './message.entity';
  * Events fanned out to every subscriber of a live generation.
  *  - delta: one new text chunk (subscriber received it AFTER subscribing,
  *           so it has not been included in any snapshot the subscriber got)
+ *  - search_started:   the turn's opt-in web search began (transient)
+ *  - search_completed: the search finished; `resultCount` hits were kept,
+ *           `warning` carries the safe degrade notice (null on success)
  *  - done:  generation finished; `message` is the final persisted row
  *  - failed: generation failed; `message` is the persisted row (status
  *           'failed'), `clientMessage` is the safe user-facing text
  */
 export type GenerationEvent =
   | { type: 'delta'; text: string }
+  | { type: 'search_started' }
+  | { type: 'search_completed'; resultCount: number; warning: string | null }
   | { type: 'done'; message: Message }
   | { type: 'failed'; message: Message; clientMessage: string };
 
@@ -56,6 +61,23 @@ export class GenerationRegistry {
     if (!generation) return () => undefined;
     generation.subscribers.add(subscriber);
     return () => generation.subscribers.delete(subscriber);
+  }
+
+  /** Transient web-search lifecycle for subscribers of the initial send. */
+  publishSearchStarted(messageId: string): void {
+    const generation = this.generations.get(messageId);
+    if (!generation) return;
+    for (const subscriber of generation.subscribers) {
+      subscriber({ type: 'search_started' });
+    }
+  }
+
+  publishSearchCompleted(messageId: string, resultCount: number, warning: string | null): void {
+    const generation = this.generations.get(messageId);
+    if (!generation) return;
+    for (const subscriber of generation.subscribers) {
+      subscriber({ type: 'search_completed', resultCount, warning });
+    }
   }
 
   /** Fans a delta out to subscribers and appends it to the snapshot buffer. */

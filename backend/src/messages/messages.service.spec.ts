@@ -25,6 +25,7 @@ describe('MessagesService — chat turn lifecycle', () => {
   let modelsService: { resolveChatModel: jest.Mock };
   let aiProviderService: { streamChat: jest.Mock };
   let filesService: { getReadyContext: jest.Mock };
+  let webSearchService: { isEnabled: jest.Mock; runForTurn: jest.Mock };
   let usersService: { getPlan: jest.Mock };
   let quotaService: { assertQuota: jest.Mock };
   let usageService: { recordTurnStart: jest.Mock; recordTurnEnd: jest.Mock };
@@ -82,6 +83,13 @@ describe('MessagesService — chat turn lifecycle', () => {
     // so no SSE byte is written for a rejected attachment.
     filesService = { getReadyContext: jest.fn().mockResolvedValue(readyFiles) };
 
+    // Web search is opt-in and disabled by default in every existing test —
+    // plain turns must never touch it (Invariant 1 regression net).
+    webSearchService = {
+      isEnabled: jest.fn().mockReturnValue(false),
+      runForTurn: jest.fn(),
+    };
+
     // Plan/quota/usage collaborators default to the permissive path.
     usersService = { getPlan: jest.fn().mockResolvedValue('free') };
     quotaService = { assertQuota: jest.fn().mockResolvedValue(undefined) };
@@ -96,6 +104,7 @@ describe('MessagesService — chat turn lifecycle', () => {
       registry,
       configService as any,
       filesService as any,
+      webSearchService as any,
       usersService as any,
       quotaService as any,
       usageService as any,
@@ -577,6 +586,105 @@ describe('MessagesService — chat turn lifecycle', () => {
     expect(messagesRepository.saved.filter((row: any) => row.role === 'user')).toHaveLength(0);
   });
 
+  // ---- web search (opt-in live search with sources/citations) ----
+
+  it('never touches web search on a plain turn (Invariant 1)', async () => {
+    setup();
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('پاسخ عادی');
+    });
+
+    const { done } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
+    const events = await done;
+
+    expect(webSearchService.runForTurn).not.toHaveBeenCalled();
+    expect(
+      events.some((e: ChatStreamEvent) => e.type === 'search_started' || e.type === 'search_completed'),
+    ).toBe(false);
+    expect(events.at(-1)).toMatchObject({ type: 'done' });
+  });
+
+  it('runs search on an opted-in turn: lifecycle events, context injection, persisted sources', async () => {
+    setup();
+    webSearchService.isEnabled.mockReturnValue(true);
+    webSearchService.runForTurn.mockResolvedValue({
+      sources: [{ title: 'React Blog', url: 'https://react.dev/blog', domain: 'react.dev', snippet: 'S' }],
+      contextBlock: '[نتایج]\nhttps://react.dev/blog',
+      warning: null,
+    });
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('پاسخ با منبع');
+    });
+
+    const { done } = await begin('user-1', 'conv-1', 'React 19؟', undefined, undefined, [], 'free', true);
+    const events = await done;
+
+    // Lifecycle: meta → search_started → search_completed → … → done.
+    expect(events[0].type).toBe('meta');
+    expect(events[1]).toEqual({ type: 'search_started' });
+    expect(events[2]).toEqual({ type: 'search_completed', resultCount: 1, warning: null });
+    expect(events.at(-1)?.type).toBe('done');
+
+    // The model prompt carries the search block (sources actually used).
+    const history = aiProviderService.streamChat.mock.calls[0][0] as { content: string }[];
+    expect(history.at(-1)?.content).toContain('https://react.dev/blog');
+
+    // Sources are persisted on the SAME assistant row (Invariant 2/10).
+    const finalRow = messagesRepository.saved
+      .filter((row: any) => row.role === 'assistant')
+      .at(-1);
+    expect(finalRow).toMatchObject({
+      status: 'completed',
+      sources: [
+        { title: 'React Blog', url: 'https://react.dev/blog', domain: 'react.dev', snippet: 'S' },
+      ],
+    });
+    const doneEvent = events.at(-1) as Extract<ChatStreamEvent, { type: 'done' }>;
+    expect(doneEvent.assistantMessage.sources).toHaveLength(1);
+  });
+
+  it('degrades a failed search to a normal turn with a safe warning (Invariant 6)', async () => {
+    setup();
+    webSearchService.isEnabled.mockReturnValue(true);
+    webSearchService.runForTurn.mockResolvedValue({
+      sources: [],
+      contextBlock: '',
+      warning: 'جستجوی وب بیش از حد طول کشید. پاسخ بدون اطلاعات وب تولید شد.',
+    });
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('پاسخ بدون وب');
+    });
+
+    const { done } = await begin('user-1', 'conv-1', 'React 19؟', undefined, undefined, [], 'free', true);
+    const events = await done;
+
+    const completed = events.find(
+      (e: ChatStreamEvent) => e.type === 'search_completed',
+    ) as Extract<ChatStreamEvent, { type: 'search_completed' }>;
+    expect(completed.resultCount).toBe(0);
+    expect(completed.warning).toContain('بدون اطلاعات وب');
+    // The turn itself still completes — no crash, no leak of internals.
+    expect(events.at(-1)).toMatchObject({ type: 'done' });
+    const history = aiProviderService.streamChat.mock.calls[0][0] as { content: string }[];
+    expect(history.at(-1)?.content).toBe('React 19؟');
+  });
+
+  it('ignores the client flag when search is disabled server-side (Invariant 7)', async () => {
+    setup(); // isEnabled() === false
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('پاسخ عادی');
+    });
+
+    const { done } = await begin('user-1', 'conv-1', 'React 19؟', undefined, undefined, [], 'free', true);
+    const events = await done;
+
+    expect(webSearchService.runForTurn).not.toHaveBeenCalled();
+    expect(
+      events.some((e: ChatStreamEvent) => e.type === 'search_started' || e.type === 'search_completed'),
+    ).toBe(false);
+    expect(events.at(-1)).toMatchObject({ type: 'done' });
+  });
+
   // ---- usage & quota wiring (day-7-8 contract §7) ----
 
   it('checks the caller quota pre-flight and resolves the model against the fresh plan', async () => {
@@ -729,6 +837,7 @@ describe('MessagesService — reconnect / recovery', () => {
   let modelsService: any;
   let aiProviderService: { streamChat: jest.Mock };
   let filesService: { getReadyContext: jest.Mock };
+  let webSearchService: { isEnabled: jest.Mock; runForTurn: jest.Mock };
   let usersService: { getPlan: jest.Mock };
   let quotaService: { assertQuota: jest.Mock };
   let usageService: { recordTurnStart: jest.Mock; recordTurnEnd: jest.Mock };
@@ -747,6 +856,14 @@ describe('MessagesService — reconnect / recovery', () => {
     };
     messagesRepository = createMockRepository();
     filesService = { getReadyContext: jest.fn().mockResolvedValue([]) };
+    // Web search is opt-in and disabled by default in every existing test —
+    // plain turns must never touch it (Invariant 1 regression net).
+    webSearchService = {
+      isEnabled: jest.fn().mockReturnValue(false),
+      runForTurn: jest.fn(),
+    };
+
+    // Plan/quota/usage collaborators default to the permissive path.
     usersService = { getPlan: jest.fn().mockResolvedValue('free') };
     quotaService = { assertQuota: jest.fn().mockResolvedValue(undefined) };
     usageService = { recordTurnStart: jest.fn().mockResolvedValue(undefined), recordTurnEnd: jest.fn().mockResolvedValue(undefined) };
@@ -759,6 +876,7 @@ describe('MessagesService — reconnect / recovery', () => {
       registry,
       { get: () => 60_000 } as any,
       filesService as any,
+      webSearchService as any,
       usersService as any,
       quotaService as any,
       usageService as any,

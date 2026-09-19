@@ -32,6 +32,8 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
  *
  * Event grammar (both endpoints):
  *   meta      → send only: { userMessage, assistantMessage(pending), model, replay }
+ *   search_started   → send only, web-search turns: {}
+ *   search_completed → send only, web-search turns: { resultCount, warning }
  *   snapshot  → reconnect only: { assistantMessage } — full content so far
  *   delta     → { text } (append)
  *   done      → { assistantMessage } (terminal success)
@@ -95,6 +97,7 @@ export class MessagesController {
       clientMessageId,
       attachments,
       plan,
+      dto.webSearch ?? false,
     );
 
     // Disconnect signal: 'close' fires on both premature disconnects and our
@@ -115,6 +118,13 @@ export class MessagesController {
           });
         } else if (event.type === 'delta') {
           this.writeEvent(response, 'delta', { text: event.text });
+        } else if (event.type === 'search_started') {
+          this.writeEvent(response, 'search_started', {});
+        } else if (event.type === 'search_completed') {
+          this.writeEvent(response, 'search_completed', {
+            resultCount: event.resultCount,
+            warning: event.warning,
+          });
         } else if (event.type === 'done') {
           this.writeEvent(response, 'done', {
             assistantMessage: this.serializeMessage(event.assistantMessage),
@@ -226,6 +236,7 @@ export class MessagesController {
     modelId: string | null;
     clientMessageId: string | null;
     attachedFileIds: string[] | null;
+    sources: { title: string; url: string; domain: string; snippet: string }[] | null;
     createdAt: Date;
   }) {
     return {
@@ -244,6 +255,9 @@ export class MessagesController {
       // Files attached to this user turn (ids only) — the client renders chips
       // from these, so a reload shows the attachment without extra calls.
       attachedFileIds: message.attachedFileIds ?? null,
+      // Web search citations of this assistant turn — persisted on the row,
+      // so history reloads render them without re-searching.
+      sources: message.sources ?? null,
       createdAt: message.createdAt,
     };
   }
