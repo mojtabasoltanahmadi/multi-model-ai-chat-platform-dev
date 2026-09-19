@@ -6,14 +6,26 @@ import { normalizeCapabilities } from './model-capabilities';
 import { CreateModelDto } from './dto/create-model.dto';
 import { UpdateModelDto } from './dto/update-model.dto';
 
-/** Shape returned to clients - never includes the provider API key. */
-export type SafeModel = Omit<AiModel, 'apiKey'> & { hasApiKey: boolean };
+/**
+ * Shape returned to ANY client — strips the provider API key AND pricing
+ * (INV-14: pricing is admin-only). Admin endpoints add the pricing back.
+ */
+export type SafeModel = Omit<AiModel, 'apiKey' | 'inputPricePerMillion' | 'outputPricePerMillion'> & {
+  hasApiKey: boolean;
+};
+
+/** Admin serializer output: SafeModel + pricing. */
+export type AdminSafeModel = SafeModel & {
+  inputPricePerMillion: string | null;
+  outputPricePerMillion: string | null;
+};
 
 /**
- * User plans. The MVP has a single FREE plan; the parameter exists so the
- * authorization chokepoint is already plan-aware when later plans arrive.
+ * User plans (day-7-8 contract §8). The plan is read FRESH from the users
+ * table per request; 'free' remains the default while premium unlocks
+ * models with isFree=false.
  */
-export type UserPlan = 'free';
+export type UserPlan = 'free' | 'premium';
 
 @Injectable()
 export class ModelsService {
@@ -22,10 +34,10 @@ export class ModelsService {
     private readonly modelsRepository: Repository<AiModel>,
   ) {}
 
-  /** All models for the admin panel (API key stripped). */
-  async listAll(): Promise<SafeModel[]> {
+  /** All models for the admin panel (API key stripped, pricing included). */
+  async listAll(): Promise<AdminSafeModel[]> {
     const models = await this.modelsRepository.find({ order: { createdAt: 'ASC' } });
-    return models.map((model) => this.toSafeModel(model));
+    return models.map((model) => this.toAdminSafeModel(model));
   }
 
   /**
@@ -40,7 +52,7 @@ export class ModelsService {
     return models.map((model) => this.toSafeModel(model));
   }
 
-  async create(dto: CreateModelDto): Promise<SafeModel> {
+  async create(dto: CreateModelDto): Promise<AdminSafeModel> {
     const willBeActive = dto.isActive ?? true;
     const willBeFree = dto.isFree ?? true;
 
@@ -51,6 +63,8 @@ export class ModelsService {
       baseUrl: dto.baseUrl?.trim() || null,
       apiKey: dto.apiKey?.trim() || null,
       capabilities: normalizeCapabilities(dto.capabilities),
+      inputPricePerMillion: normalizePrice(dto.inputPricePerMillion),
+      outputPricePerMillion: normalizePrice(dto.outputPricePerMillion),
       isActive: willBeActive,
       isFree: willBeFree,
       isDefault: false,
@@ -64,10 +78,10 @@ export class ModelsService {
       model.isDefault = true;
     }
 
-    return this.toSafeModel(await this.modelsRepository.save(model));
+    return this.toAdminSafeModel(await this.modelsRepository.save(model));
   }
 
-  async update(id: string, dto: UpdateModelDto): Promise<SafeModel> {
+  async update(id: string, dto: UpdateModelDto): Promise<AdminSafeModel> {
     const model = await this.modelsRepository.findOne({ where: { id } });
     if (!model) throw new NotFoundException('مدل پیدا نشد.');
 
@@ -89,17 +103,23 @@ export class ModelsService {
     if (dto.baseUrl !== undefined) model.baseUrl = dto.baseUrl?.trim() || null;
     if (dto.apiKey !== undefined) model.apiKey = dto.apiKey.trim() || null;
     if (dto.capabilities !== undefined) model.capabilities = normalizeCapabilities(dto.capabilities);
+    if (dto.inputPricePerMillion !== undefined) {
+      model.inputPricePerMillion = normalizePrice(dto.inputPricePerMillion);
+    }
+    if (dto.outputPricePerMillion !== undefined) {
+      model.outputPricePerMillion = normalizePrice(dto.outputPricePerMillion);
+    }
     if (dto.isActive !== undefined) model.isActive = dto.isActive;
     if (dto.isFree !== undefined) model.isFree = dto.isFree;
 
-    return this.toSafeModel(await this.modelsRepository.save(model));
+    return this.toAdminSafeModel(await this.modelsRepository.save(model));
   }
 
   /**
    * Invariant: at most one default model, and it must be active and free.
    * The swap runs in a transaction so both rows change atomically.
    */
-  async setDefault(id: string): Promise<SafeModel> {
+  async setDefault(id: string): Promise<AdminSafeModel> {
     const model = await this.modelsRepository.findOne({ where: { id } });
     if (!model) throw new NotFoundException('مدل پیدا نشد.');
     if (!model.isActive) {
@@ -117,7 +137,7 @@ export class ModelsService {
     });
 
     model.isDefault = true;
-    return this.toSafeModel(model);
+    return this.toAdminSafeModel(model);
   }
 
   async remove(id: string): Promise<void> {
@@ -175,7 +195,28 @@ export class ModelsService {
   }
 
   private toSafeModel(model: AiModel): SafeModel {
-    const { apiKey, ...rest } = model;
+    const { apiKey, inputPricePerMillion, outputPricePerMillion, ...rest } = model;
     return { ...rest, hasApiKey: Boolean(apiKey) };
   }
+
+  private toAdminSafeModel(model: AiModel): AdminSafeModel {
+    return {
+      ...this.toSafeModel(model),
+      inputPricePerMillion: model.inputPricePerMillion,
+      outputPricePerMillion: model.outputPricePerMillion,
+    };
+  }
+}
+
+/**
+ * Normalizes a price value from the DTO boundary: trims, drops empty/zero
+ * strings to null ("not priced"), keeps numeric strings for Postgres numeric.
+ */
+function normalizePrice(value: string | number | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return raw;
 }

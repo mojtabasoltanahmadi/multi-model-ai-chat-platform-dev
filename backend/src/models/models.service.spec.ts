@@ -281,4 +281,55 @@ describe('ModelsService', () => {
       ).resolves.toMatchObject({ provider: 'anthropic' });
     });
   });
+
+  describe('pricing serialization (INV-14)', () => {
+    it('user-facing listAvailable strips pricing; admin listAll keeps it', async () => {
+      repository.find.mockResolvedValue([
+        model({
+          inputPricePerMillion: '100.500000',
+          outputPricePerMillion: '200.000000',
+        }),
+      ]);
+
+      const [available] = await service.listAvailable('free');
+      expect(available).not.toHaveProperty('inputPricePerMillion');
+      expect(available).not.toHaveProperty('outputPricePerMillion');
+      expect(available).toHaveProperty('hasApiKey');
+
+      repository.find.mockClear();
+      repository.find.mockResolvedValue([
+        model({
+          inputPricePerMillion: '100.500000',
+          outputPricePerMillion: '200.000000',
+        }),
+      ]);
+      const [admin] = await service.listAll();
+      expect(admin).toMatchObject({
+        inputPricePerMillion: '100.500000',
+        outputPricePerMillion: '200.000000',
+      });
+      expect(admin).not.toHaveProperty('apiKey');
+    });
+
+    it('normalizes prices on create: empty or zero becomes null (not priced)', async () => {
+      repository.exists.mockResolvedValue(true);
+      repository.save.mockImplementation(async (data: any) => ({ id: 'model-1', ...data }));
+      const created = await service.create({
+        name: 'X',
+        provider: 'google',
+        externalModelId: 'gemini-1.5-flash',
+        inputPricePerMillion: '0',
+        outputPricePerMillion: '  ',
+      } as any);
+      expect(created.inputPricePerMillion).toBeNull();
+      expect(created.outputPricePerMillion).toBeNull();
+    });
+
+    it('accepts a positive price string on update', async () => {
+      repository.findOne.mockResolvedValue(model({}));
+      await expect(
+        service.update('model-1', { inputPricePerMillion: '35000' } as any),
+      ).resolves.toMatchObject({ inputPricePerMillion: '35000' });
+    });
+  });
 });

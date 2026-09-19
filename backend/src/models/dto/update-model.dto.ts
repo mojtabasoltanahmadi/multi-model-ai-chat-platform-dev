@@ -53,4 +53,14 @@ export class UpdateModelDto {
   @IsOptional()
   @IsBoolean()
   isFree?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  inputPricePerMillion?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  outputPricePerMillion?: string | null;
 }

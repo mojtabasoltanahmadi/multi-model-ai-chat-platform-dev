@@ -69,6 +69,18 @@ export class AiModel {
   @Column({ type: 'jsonb', default: '[]' })
   capabilities: ModelCapability[];
 
+  /**
+   * Pricing in Toman per 1M tokens (day-7-8 contract §15; precision widened
+   * from the contract's (12,6) to (14,6) so a 1M-Toman price — 7 integer
+   * digits — fits). Null ⇒ no cost is computed for this model. Exposed to
+   * ADMIN endpoints only (INV-14) — SafeModel strips both fields.
+   */
+  @Column({ name: 'input_price_per_million', type: 'numeric', precision: 14, scale: 6, nullable: true })
+  inputPricePerMillion: string | null;
+
+  @Column({ name: 'output_price_per_million', type: 'numeric', precision: 14, scale: 6, nullable: true })
+  outputPricePerMillion: string | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 }

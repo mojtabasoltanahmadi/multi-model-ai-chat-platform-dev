@@ -7,6 +7,7 @@ import { Conversation } from '../conversations/conversation.entity';
 import { Message } from '../messages/message.entity';
 import { AiModel } from '../models/ai-model.entity';
 import { File } from '../files/file.entity';
+import { UsageRecord } from '../usage/usage-record.entity';
 
 /**
  * Central TypeORM setup. `synchronize` auto-creates the schema and is a
@@ -26,7 +27,7 @@ import { File } from '../files/file.entity';
         password: configService.get<string>('database.password'),
         database: configService.get<string>('database.name'),
         synchronize: configService.get<boolean>('database.synchronize'),
-        entities: [User, Conversation, Message, AiModel, File],
+        entities: [User, Conversation, Message, AiModel, File, UsageRecord],
         logging: false,
       }),
     }),

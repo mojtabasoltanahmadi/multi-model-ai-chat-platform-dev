@@ -9,6 +9,8 @@ export interface PanelFormValues {
   baseUrl: string;
   apiKey: string;
   capabilities: ModelCapability[];
+  inputPricePerMillion: string;
+  outputPricePerMillion: string;
   isActive: boolean;
   isFree: boolean;
 }
@@ -25,12 +27,12 @@ import { formatFullDate } from '../../utils/format';
 import {
   MODEL_CAPABILITIES,
   MODEL_CAPABILITY_LABELS,
-  type AiModel,
+  type AdminModel,
 } from '../../api/types';
 
 interface Props {
   /** null → create mode; otherwise edit this model. */
-  model: AiModel | null;
+  model: AdminModel | null;
   saving?: boolean;
 }
 
@@ -38,7 +40,7 @@ const props = withDefaults(defineProps<Props>(), { saving: false });
 const emit = defineEmits<{
   submit: [values: PanelFormValues];
   close: [];
-  setDefault: [model: AiModel];
+  setDefault: [model: AdminModel];
 }>();
 
 /** One entry per registered provider kind (mirrors the backend adapters). */
@@ -74,6 +76,8 @@ const values = reactive<PanelFormValues>({
   baseUrl: '',
   apiKey: '',
   capabilities: [],
+  inputPricePerMillion: '',
+  outputPricePerMillion: '',
   isActive: true,
   isFree: true,
 });
@@ -83,7 +87,7 @@ const placeholders = computed(() => providerPlaceholders[values.provider]);
 const validation = ref({ name: '', externalModelId: '' });
 const copied = ref(false);
 
-function init(from: AiModel | null) {
+function init(from: AdminModel | null) {
   values.name = from?.name ?? '';
   values.provider = from?.provider ?? 'mock';
   values.externalModelId = from?.externalModelId ?? '';
@@ -92,6 +96,8 @@ function init(from: AiModel | null) {
   // only a typed value is submitted (view handles the "keep existing" case).
   values.apiKey = '';
   values.capabilities = from?.capabilities ? [...from.capabilities] : [];
+  values.inputPricePerMillion = from?.inputPricePerMillion ?? '';
+  values.outputPricePerMillion = from?.outputPricePerMillion ?? '';
   values.isActive = from?.isActive ?? true;
   values.isFree = from?.isFree ?? true;
   validation.value = { name: '', externalModelId: '' };
@@ -122,6 +128,8 @@ function submit() {
     baseUrl: values.baseUrl.trim(),
     apiKey: values.apiKey.trim(),
     capabilities: values.capabilities,
+    inputPricePerMillion: values.inputPricePerMillion.trim(),
+    outputPricePerMillion: values.outputPricePerMillion.trim(),
     isActive: values.isActive,
     isFree: values.isFree,
   });
@@ -231,6 +239,30 @@ async function copyId() {
         </div>
         <span class="panel-form__hint">
           قابلیت‌ها ویژگی‌های جانبی این مدل را معرفی می‌کنند و در فهرست انتخاب کاربران نمایش داده می‌شوند.
+        </span>
+      </div>
+
+      <!-- قیمت‌گذاری (مبنای محاسبه هزینه مصرف) -->
+      <div class="panel-form__field">
+        <span class="panel-form__label">قیمت هر یک میلیون توکن (تومان — اختیاری)</span>
+        <div class="panel-form__prices">
+          <AppInput
+            v-model="values.inputPricePerMillion"
+            label="توکن ورودی"
+            dir="ltr"
+            inputmode="decimal"
+            placeholder="1000000"
+          />
+          <AppInput
+            v-model="values.outputPricePerMillion"
+            label="توکن خروجی"
+            dir="ltr"
+            inputmode="decimal"
+            placeholder="2000000"
+          />
+        </div>
+        <span class="panel-form__hint">
+          در صورت خالی گذاشتن هر دو قیمت، هزینه این مدل محاسبه نمی‌شود. قیمت‌ها فقط در پنل مدیریت دیده می‌شوند.
         </span>
       </div>
 
@@ -493,6 +525,18 @@ async function copyId() {
 .panel-form__hint {
   font-size: 0.7rem;
   color: var(--text-3);
+}
+
+.panel-form__prices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+}
+
+@media (max-width: 640px) {
+  .panel-form__prices {
+    grid-template-columns: 1fr;
+  }
 }
 
 .panel-form__switch-row {
