@@ -145,6 +145,12 @@ function goAdminBilling() {
   void router.push({ name: 'admin-billing' });
 }
 
+function goAdminThemes() {
+  profileOpen.value = false;
+  emit('close');
+  void router.push({ name: 'admin-themes' });
+}
+
 function onLogout() {
   profileOpen.value = false;
   emit('close');
@@ -349,6 +355,19 @@ function onCreate() {
                 <path d="M2 10h20" />
               </svg>
               مدیریت پرداخت‌ها
+            </button>
+            <button
+              v-if="auth.isAdmin.value"
+              type="button"
+              class="sidebar__menu-item"
+              role="menuitem"
+              @click="goAdminThemes"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" />
+                <path d="m12 3-2.5 6L3 12l6.5 3L12 21l2.5-6L21 12l-6.5-3Z" />
+              </svg>
+              مدیریت پوسته‌ها
             </button>
             <button
               type="button"

@@ -55,6 +55,14 @@ const routes = [
     component: () => import('../views/AdminUsageView.vue'),
     meta: { adminOnly: true },
   },
+  {
+    // Theme management: availability/default/order are admin-controlled and
+    // enforced server-side — this page only drives the admin/themes endpoints.
+    path: '/admin/themes',
+    name: 'admin-themes',
+    component: () => import('../views/AdminThemesView.vue'),
+    meta: { adminOnly: true },
+  },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ];
 
