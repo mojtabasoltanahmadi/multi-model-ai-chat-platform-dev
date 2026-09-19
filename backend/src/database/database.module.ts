@@ -8,6 +8,11 @@ import { Message } from '../messages/message.entity';
 import { AiModel } from '../models/ai-model.entity';
 import { File } from '../files/file.entity';
 import { UsageRecord } from '../usage/usage-record.entity';
+import { Plan } from '../billing/plan.entity';
+import { Subscription } from '../billing/subscription.entity';
+import { Payment } from '../billing/payment.entity';
+import { WebhookEvent } from '../billing/webhook-event.entity';
+import { AuditLog } from '../billing/audit-log.entity';
 
 /**
  * Central TypeORM setup. `synchronize` auto-creates the schema and is a
@@ -27,7 +32,19 @@ import { UsageRecord } from '../usage/usage-record.entity';
         password: configService.get<string>('database.password'),
         database: configService.get<string>('database.name'),
         synchronize: configService.get<boolean>('database.synchronize'),
-        entities: [User, Conversation, Message, AiModel, File, UsageRecord],
+        entities: [
+          User,
+          Conversation,
+          Message,
+          AiModel,
+          File,
+          UsageRecord,
+          Plan,
+          Subscription,
+          Payment,
+          WebhookEvent,
+          AuditLog,
+        ],
         logging: false,
       }),
     }),

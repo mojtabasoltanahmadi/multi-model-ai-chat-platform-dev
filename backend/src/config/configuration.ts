@@ -84,6 +84,12 @@ export default () => ({
     // Cap on the search block injected into the model prompt.
     maxContextChars: parseInt(process.env.WEB_SEARCH_MAX_CONTEXT_CHARS ?? '6000', 10),
   },
+  // ---- Billing / payments (day 9-10) ----
+  // Shared HMAC secret between the payment gateway (simulator) and the
+  // public webhook endpoint. MUST be overridden per deployment.
+  billing: {
+    webhookSecret: process.env.PAYMENT_WEBHOOK_SECRET ?? 'dev-only-webhook-secret-change-me',
+  },
   queue: {
     redisHost: process.env.REDIS_HOST ?? 'localhost',
     redisPort: parseInt(process.env.REDIS_PORT ?? '6379', 10),
