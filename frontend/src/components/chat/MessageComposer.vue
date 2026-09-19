@@ -20,11 +20,14 @@ interface Props {
   disabled?: boolean;
   /** Shown when no conversation is active — sending will create one. */
   hint?: string;
+  /** Daily quota exhausted — Send locks with an explanatory reason. */
+  quotaLocked?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   disabled: false,
   hint: '',
+  quotaLocked: false,
   attachments: () => [],
   previews: () => ({}),
   requestPreview: undefined,
@@ -67,12 +70,15 @@ const canSend = computed(
   () =>
     !props.disabled &&
     !props.streaming &&
+    !props.quotaLocked &&
     uploadsPending.value.length === 0 &&
     (draft.value.trim().length > 0 || readyAttachments.value.length > 0),
 );
 
 /** Why Send is locked; the button's tooltip and accessible name say it. */
 const sendLockReason = computed(() => {
+  if (props.quotaLocked)
+    return 'سهمیه پیام‌های امروز شما تمام شده است؛ فردا دوباره تلاش کنید.';
   if (failedUpload.value) return 'آپلود یک فایل ناموفق بود؛ دوباره تلاش کنید یا فایل را حذف کنید.';
   if (uploadsPending.value.length > 0) return 'تا پایان آپلود همهٔ فایل‌ها امکان ارسال نیست.';
   return '';
