@@ -249,7 +249,8 @@ message, markdown rendering of answers, copy-answer action, collapsible sidebar.
 
 **Out of scope (Task 1)** — file upload, email verification, password reset, refresh
 tokens, rate limiting `[Q-3]`, Redis/BullMQ, MinIO, OpenTelemetry/SigNoz, k6, RAG,
-payments, multi-agent, Kubernetes, i18n beyond Persian, mobile apps.
+payments (SUPERSEDED day 9-10 — see docs/architecture/day-9-10-billing.md), multi-agent,
+Kubernetes, i18n beyond Persian, mobile apps.
 
 ## 13. Open Questions & Assumptions
 
