@@ -94,6 +94,10 @@ function goBilling() {
   void router.push({ name: 'admin-billing' });
 }
 
+function goThemes() {
+  void router.push({ name: 'admin-themes' });
+}
+
 function logout() {
   auth.logout();
   void router.push({ name: 'login' });
@@ -126,6 +130,7 @@ function cost(value: number): string {
       <div class="admin__header-actions">
         <AppButton variant="ghost" size="sm" @click="goModels">مدیریت مدل‌ها</AppButton>
         <AppButton variant="ghost" size="sm" @click="goBilling">مدیریت پرداخت‌ها</AppButton>
+        <AppButton variant="ghost" size="sm" @click="goThemes">مدیریت پوسته‌ها</AppButton>
         <AppButton variant="ghost" size="sm" @click="goBack">بازگشت به چت</AppButton>
         <AppButton variant="ghost" size="sm" @click="logout">خروج</AppButton>
       </div>
