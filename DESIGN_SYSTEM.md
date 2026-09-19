@@ -127,6 +127,34 @@ Three first-class themes, scoped by `:root[data-theme='…']`:
 to light/dark). Applied pre-paint by the inline script in `index.html`
 (no FOUC); `<meta name="theme-color">` follows the resolved theme.
 
+**Theme Management layer (server-controlled availability).** WHICH themes users
+may pick, their order and the global default are backend state (the `themes`
+table, admin-managed) — the frontend never hardcodes the selectable list:
+
+* `frontend/src/themes/registry.ts` — visual metadata per id (name/description
+  fallbacks + flat preview palettes). No availability logic.
+* `frontend/src/themes/resolver.ts` — pure fallback resolution:
+  available preference → 'system' target (only if enabled) → server default →
+  first available → 'light'. Unit-tested in `tests/themeResolve.test.mjs`.
+* `useTheme` — loads availability from `GET /api/themes/available` (public),
+  syncs concrete choices to `PATCH /api/users/me/preferences/theme`
+  (cross-device persistence; `system` stays device-local) and re-snaps the
+  local preference when an admin disables the selected theme.
+* `ThemeToggle` renders ONLY enabled themes (server order) + the `system`
+  entry, with per-theme preview swatches and a check on the active option.
+* Admin control lives in `AdminThemesView` (`/admin/themes`): enable/disable
+  switches, set-default, up/down reorder, per-theme `ThemePreviewCard`
+  mockups and an opt-in live preview modal. Disabling the default asks for
+  confirmation (the default auto-moves to the first remaining enabled theme).
+* Invariants live server-side (`themes.service.ts`): ≥1 enabled theme,
+  exactly one default and a default is always enabled; unknown/disabled
+  theme ids are rejected at the preference and admin boundaries.
+
+**Adding a theme** (all keyed by one stable id): a `:root[data-theme='…']`
+token block in `tokens.css` + an entry in `THEME_DEFINITIONS` +
+a seed row in `backend/src/themes/theme-registry.ts`. Availability defaults
+to enabled; no component changes.
+
 **Dark Mode Rule (updated)**: dark (navy) and midnight (neutral) are separate
 dark designs, not variants of one another. Navy = blue-tinted every step;
 Midnight = neutral charcoal with hairline borders. Never blend the two surface
@@ -710,6 +738,22 @@ Date:     2026-09-18
 Affected: tokens.css, useTheme.ts, index.html (pre-paint + theme-color),
           ThemeToggle (4-way), AmbientGlow, AppSidebar, AdminModelsView,
           MessageComposer, AppInput (region/focus tokens).
+
+Decision: Theme availability becomes server state (admin-managed): `themes`
+          table + `user_preferences` on the backend; ThemeToggle and the new
+          /admin/themes page consume GET /themes/available instead of a
+          hardcoded option list. Client keeps visual definitions only
+          (themes/registry.ts) and a pure fallback resolver.
+Reason:   The brief requires admin control (enable/disable, default, order,
+          preview) with server-enforced authorization and a never-undefined
+          fallback chain; hiding buttons in the frontend is not authorization.
+          Before the first successful load the full local registry is assumed,
+          so offline behavior is identical to the pre-server app.
+Date:     2026-09-20
+Affected: themes.service.ts, preferences.service.ts, ThemesController,
+          AdminThemesController (new, backend); themes/registry.ts,
+          themes/resolver.ts, useTheme.ts, ThemeToggle, AdminThemesView,
+          ThemePreviewCard (new, frontend).
 
 Decision: A file chip only shows «آماده» when the backend says READY — the upload status is
           never advanced optimistically, and a non-ready attachment blocks sending with an
