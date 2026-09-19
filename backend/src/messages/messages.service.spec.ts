@@ -13,6 +13,19 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 /** Provider adapters now yield normalized events — helper keeps the specs readable. */
 const text = (value: string): ProviderEvent => ({ type: 'text', text: value });
 
+/** Entitlement snapshot builder — mirrors the EntitlementsService shape. */
+const entitlement = (overrides: Record<string, unknown> = {}) => ({
+  tier: 'free' as const,
+  planSlug: 'free',
+  planName: 'رایگان',
+  subscriptionId: null,
+  currentPeriodEnd: null,
+  quota: { dailyMessages: 50, dailyTokens: null },
+  features: { webSearch: true, thinking: true, fileProcessing: true },
+  allowedModelIds: null,
+  ...overrides,
+});
+
 describe('MessagesService — chat turn lifecycle', () => {
   let service: MessagesService;
   let registry: GenerationRegistry;
@@ -26,7 +39,7 @@ describe('MessagesService — chat turn lifecycle', () => {
   let aiProviderService: { streamChat: jest.Mock };
   let filesService: { getReadyContext: jest.Mock };
   let webSearchService: { isEnabled: jest.Mock; runForTurn: jest.Mock };
-  let usersService: { getPlan: jest.Mock };
+  let entitlementsService: { resolveForUser: jest.Mock };
   let quotaService: { assertQuota: jest.Mock };
   let usageService: { recordTurnStart: jest.Mock; recordTurnEnd: jest.Mock };
 
@@ -52,7 +65,7 @@ describe('MessagesService — chat turn lifecycle', () => {
       renameTitle: jest.fn().mockResolvedValue(undefined),
     };
     modelsService = {
-      resolveChatModel: jest.fn().mockResolvedValue({ id: 'model-1', name: 'Mock', provider: 'mock' }),
+      resolveChatModel: jest.fn().mockResolvedValue({ id: 'model-1', name: 'Mock', provider: 'mock', capabilities: [] }),
     };
     messagesRepository = createMockRepository();
 
@@ -90,8 +103,8 @@ describe('MessagesService — chat turn lifecycle', () => {
       runForTurn: jest.fn(),
     };
 
-    // Plan/quota/usage collaborators default to the permissive path.
-    usersService = { getPlan: jest.fn().mockResolvedValue('free') };
+    // Entitlement/quota/usage collaborators default to the permissive path.
+    entitlementsService = { resolveForUser: jest.fn().mockResolvedValue(entitlement()) };
     quotaService = { assertQuota: jest.fn().mockResolvedValue(undefined) };
     usageService = { recordTurnStart: jest.fn().mockResolvedValue(undefined), recordTurnEnd: jest.fn().mockResolvedValue(undefined) };
 
@@ -105,7 +118,7 @@ describe('MessagesService — chat turn lifecycle', () => {
       configService as any,
       filesService as any,
       webSearchService as any,
-      usersService as any,
+      entitlementsService as any,
       quotaService as any,
       usageService as any,
     );
@@ -687,23 +700,24 @@ describe('MessagesService — chat turn lifecycle', () => {
 
   // ---- usage & quota wiring (day-7-8 contract §7) ----
 
-  it('checks the caller quota pre-flight and resolves the model against the fresh plan', async () => {
+  it('checks the caller quota pre-flight and resolves the model against the fresh entitlements', async () => {
     setup();
-    usersService.getPlan.mockResolvedValue('premium');
+    const premium = entitlement({ tier: 'premium' });
+    entitlementsService.resolveForUser.mockResolvedValue(premium);
 
     await service.assertChatTurnAllowed('user-1', 'conv-1', undefined, {
       clientMessageId: undefined,
       content: 'سلام',
     });
 
-    expect(usersService.getPlan).toHaveBeenCalledWith('user-1');
-    expect(quotaService.assertQuota).toHaveBeenCalledWith('user-1', 'premium');
+    expect(entitlementsService.resolveForUser).toHaveBeenCalledWith('user-1');
+    expect(quotaService.assertQuota).toHaveBeenCalledWith('user-1', 'premium', premium.quota);
     expect(modelsService.resolveChatModel).toHaveBeenCalledWith(undefined, 'premium');
   });
 
   it('beginChatTurn resolves the model against the plan handed down from pre-flight', async () => {
     setup();
-    usersService.getPlan.mockResolvedValue('premium');
+    entitlementsService.resolveForUser.mockResolvedValue(entitlement({ tier: 'premium' }));
     aiProviderService.streamChat.mockImplementation(async function* () {
       yield text('ok');
     });
@@ -712,6 +726,80 @@ describe('MessagesService — chat turn lifecycle', () => {
 
     // the second resolve (turn creation) uses the SAME plan, not a hard-code
     expect(modelsService.resolveChatModel).toHaveBeenLastCalledWith(undefined, 'premium');
+  });
+
+  // ---- INV-05: plan features enforced server-side (frontend is never trusted) ----
+
+  it('rejects a web-search turn when the plan lacks the entitlement (403, pre-stream)', async () => {
+    setup();
+    entitlementsService.resolveForUser.mockResolvedValue(
+      entitlement({ features: { webSearch: false, thinking: true, fileProcessing: true } }),
+    );
+
+    await expect(
+      service.assertChatTurnAllowed('user-1', 'conv-1', undefined, { content: 'سلام' }, [], false, true),
+    ).rejects.toThrow(/جستجوی وب/);
+  });
+
+  it('rejects a reasoning model when the plan lacks the thinking entitlement', async () => {
+    setup();
+    entitlementsService.resolveForUser.mockResolvedValue(
+      entitlement({ features: { webSearch: true, thinking: false, fileProcessing: true } }),
+    );
+    modelsService.resolveChatModel.mockResolvedValue({
+      id: 'model-1',
+      name: 'Mock',
+      provider: 'mock',
+      capabilities: ['reasoning'],
+    });
+
+    await expect(
+      service.assertChatTurnAllowed('user-1', 'conv-1', 'model-1', { content: 'سلام' }),
+    ).rejects.toThrow(/تفکر عمیق/);
+  });
+
+  it('rejects file attachments when the plan lacks file processing', async () => {
+    setup();
+    entitlementsService.resolveForUser.mockResolvedValue(
+      entitlement({ features: { webSearch: true, thinking: true, fileProcessing: false } }),
+    );
+
+    await expect(
+      service.assertChatTurnAllowed('user-1', 'conv-1', undefined, { content: 'سلام' }, ['f1']),
+    ).rejects.toThrow(/پیوست فایل/);
+  });
+
+  it('enforces the plan’s model allowlist on top of the free/premium rules', async () => {
+    setup();
+    entitlementsService.resolveForUser.mockResolvedValue(entitlement({ allowedModelIds: ['model-x'] }));
+
+    await expect(
+      service.assertChatTurnAllowed('user-1', 'conv-1', 'model-1', { content: 'سلام' }),
+    ).rejects.toThrow(/این مدل در طرح فعلی شما مجاز نیست/);
+  });
+
+  it('admins bypass feature entitlements but not model allowlist/state checks', async () => {
+    setup();
+    entitlementsService.resolveForUser.mockResolvedValue(
+      entitlement({
+        tier: 'free',
+        features: { webSearch: false, thinking: false, fileProcessing: false },
+        allowedModelIds: ['model-1'],
+      }),
+    );
+
+    // Feature gates are admin-bypassed (like quotas); the plan allowlist and
+    // resolveChatModel checks still apply to admins.
+    await expect(
+      service.assertChatTurnAllowed('admin-1', 'conv-1', 'model-1', { content: 'سلام' }, [], true, true),
+    ).resolves.toMatchObject({ plan: 'free' });
+
+    entitlementsService.resolveForUser.mockResolvedValue(
+      entitlement({ allowedModelIds: ['model-x'] }),
+    );
+    await expect(
+      service.assertChatTurnAllowed('admin-1', 'conv-1', 'model-1', { content: 'سلام' }, [], true, true),
+    ).rejects.toThrow(/این مدل در طرح فعلی شما مجاز نیست/);
   });
 
   it('skips the quota check for admins', async () => {
@@ -838,7 +926,7 @@ describe('MessagesService — reconnect / recovery', () => {
   let aiProviderService: { streamChat: jest.Mock };
   let filesService: { getReadyContext: jest.Mock };
   let webSearchService: { isEnabled: jest.Mock; runForTurn: jest.Mock };
-  let usersService: { getPlan: jest.Mock };
+  let entitlementsService: { resolveForUser: jest.Mock };
   let quotaService: { assertQuota: jest.Mock };
   let usageService: { recordTurnStart: jest.Mock; recordTurnEnd: jest.Mock };
 
@@ -852,7 +940,7 @@ describe('MessagesService — reconnect / recovery', () => {
       renameTitle: jest.fn(),
     };
     modelsService = {
-      resolveChatModel: jest.fn().mockResolvedValue({ id: 'model-1', name: 'Mock', provider: 'mock' }),
+      resolveChatModel: jest.fn().mockResolvedValue({ id: 'model-1', name: 'Mock', provider: 'mock', capabilities: [] }),
     };
     messagesRepository = createMockRepository();
     filesService = { getReadyContext: jest.fn().mockResolvedValue([]) };
@@ -863,8 +951,8 @@ describe('MessagesService — reconnect / recovery', () => {
       runForTurn: jest.fn(),
     };
 
-    // Plan/quota/usage collaborators default to the permissive path.
-    usersService = { getPlan: jest.fn().mockResolvedValue('free') };
+    // Entitlement/quota/usage collaborators default to the permissive path.
+    entitlementsService = { resolveForUser: jest.fn().mockResolvedValue(entitlement()) };
     quotaService = { assertQuota: jest.fn().mockResolvedValue(undefined) };
     usageService = { recordTurnStart: jest.fn().mockResolvedValue(undefined), recordTurnEnd: jest.fn().mockResolvedValue(undefined) };
     registry = new GenerationRegistry();
@@ -877,7 +965,7 @@ describe('MessagesService — reconnect / recovery', () => {
       { get: () => 60_000 } as any,
       filesService as any,
       webSearchService as any,
-      usersService as any,
+      entitlementsService as any,
       quotaService as any,
       usageService as any,
     );
