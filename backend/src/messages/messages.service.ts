@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { Message, MessageStatus } from './message.entity';
 import { ConversationsService } from '../conversations/conversations.service';
 import { ModelsService, UserPlan } from '../models/models.service';
@@ -44,6 +44,14 @@ const FALLBACK_ELIGIBLE_KINDS: ReadonlySet<ProviderErrorKind> = new Set([
   'rate-limit',
   'unavailable',
 ]);
+
+/**
+ * Sentinel for a user-stopped generation (Stop button). Never retryable,
+ * never a failure: the generation loop routes it to the 'interrupted'
+ * finalization instead of the 'failed' path.
+ */
+const cancelledError = (): ProviderError =>
+  new ProviderError('cancelled', null, 'Generation was cancelled by the client.');
 
 /** Plan-scoped access facts the generation loop needs at fallback time. */
 export interface TurnAccess {
@@ -85,6 +93,9 @@ export interface TurnAccess {
  *              orphaned generation, honestly 'interrupted') + a safe
  *              user-facing message. Clients offer Retry; the internal
  *              errorMessage is never part of this payload.
+ *  - cancelled: terminal; the user stopped this generation (Stop button).
+ *              The persisted row (status 'interrupted', partial content)
+ *              rides along so clients finalize without fabricating state.
  */
 export type ChatStreamEvent =
   | {
@@ -102,7 +113,8 @@ export type ChatStreamEvent =
   | { type: 'snapshot'; assistantMessage: Message }
   | { type: 'delta'; text: string }
   | { type: 'done'; assistantMessage: Message }
-  | { type: 'failed'; assistantMessage: Message; clientMessage: string };
+  | { type: 'failed'; assistantMessage: Message; clientMessage: string }
+  | { type: 'cancelled'; assistantMessage: Message };
 
 /** Shape of the object returned by beginChatTurn. */
 export interface ChatTurnHandle {
@@ -143,6 +155,8 @@ export class MessagesService {
   private readonly logger = new Logger(MessagesService.name);
   private readonly persistIntervalMs: number;
   private readonly maxFileContextChars: number;
+  /** Bound for the Stop endpoint's wait on the generation's terminal state. */
+  private readonly stopSettleTimeoutMs: number;
 
   constructor(
     @InjectRepository(Message)
@@ -160,6 +174,7 @@ export class MessagesService {
   ) {
     this.persistIntervalMs = configService.get<number>('ai.persistIntervalMs') ?? 1500;
     this.maxFileContextChars = configService.get<number>('files.maxContextChars') ?? 24000;
+    this.stopSettleTimeoutMs = configService.get<number>('ai.stopSettleTimeoutMs') ?? 5000;
   }
 
   /** Loads a user's conversation including its messages. */
@@ -386,13 +401,16 @@ export class MessagesService {
       },
     ];
 
-    this.generationRegistry.register(assistantMessage.id);
     const messageId = assistantMessage.id;
 
     let completionResolve!: (message: Message) => void;
     const completion = new Promise<Message>((resolve) => {
       completionResolve = resolve;
     });
+
+    // Registered with its completion promise so the Stop endpoint can await
+    // this generation's deterministic terminal state before responding.
+    this.generationRegistry.register(messageId, completion);
 
     // Subscribe the event feed FIRST so the `events` generator can also
     // surface buffered events that happen before the caller subscribes.
@@ -411,6 +429,9 @@ export class MessagesService {
 
     // The generation loop — deliberately not awaited by the caller. It runs
     // to a persisted terminal state whether or not anyone is subscribed.
+    // A user-initiated Stop aborts the registry's cancellation signal; the
+    // loop then stops consuming the provider stream and persists the partial
+    // row as 'interrupted' (never 'completed', never 'failed').
     void this.runGeneration(
       assistantMessage,
       history,
@@ -420,6 +441,7 @@ export class MessagesService {
       searchActive ? { query: turnUserMessage.content } : null,
       plan,
       access,
+      this.generationRegistry.cancelSignal(messageId) ?? new AbortController().signal,
     ).catch((error) => {
       // runGeneration handles its own failures; this is a last-resort net.
       this.logger.error(
@@ -457,6 +479,9 @@ export class MessagesService {
             } else if (event.type === 'done') {
               yield { type: 'done', assistantMessage: event.message };
               return;
+            } else if (event.type === 'cancelled') {
+              yield { type: 'cancelled', assistantMessage: event.message };
+              return;
             } else {
               yield {
                 type: 'failed',
@@ -491,6 +516,12 @@ export class MessagesService {
    * to subscribers, and persists progress incrementally (throttled) so a
    * crash loses at most ~persistIntervalMs of text. Client disconnection
    * never reaches this loop — it only removes subscribers.
+   *
+   * Cancellation (the user's Stop button) aborts `cancelSignal`; the loop
+   * then stops consuming the provider stream and persists the partial row
+   * as 'interrupted' — never 'completed', never 'failed'. Tokens that arrive
+   * after the abort are discarded at the checkpoint below, so they never
+   * mutate the persisted message.
    */
   private async runGeneration(
     assistantMessage: Message,
@@ -505,6 +536,8 @@ export class MessagesService {
     plan: UserPlan = 'free',
     /** Plan-scoped allowlist/features re-checked for the fallback model. */
     access?: TurnAccess,
+    /** Aborted by the user's Stop (GenerationRegistry.requestCancel). */
+    cancelSignal: AbortSignal = new AbortController().signal,
   ): Promise<void> {
     const messageId = assistantMessage.id;
     let streamingFlipped = false;
@@ -564,6 +597,12 @@ export class MessagesService {
         }
       }
 
+      // Stop during the search phase: the search itself is not abortable,
+      // but the turn must not open a provider call for a stopped user.
+      if (cancelSignal.aborted) {
+        throw cancelledError();
+      }
+
       // Provider loop with the single-hop fallback (day-7-8 contract §12):
       // one retry on a RETRYABLE normalized failure (timeout / rate-limit /
       // unavailable), only BEFORE the first published delta, only onto the
@@ -584,7 +623,17 @@ export class MessagesService {
           this.generationRegistry.publishStatus(messageId, 'thinking');
         }
         try {
-          for await (const event of this.aiProviderService.streamChat(prompt, currentModel)) {
+          for await (const event of this.aiProviderService.streamChat(
+            prompt,
+            currentModel,
+            cancelSignal,
+          )) {
+            // Cancellation checkpoint: any token surfaced after the user
+            // stopped is discarded — it must never mutate the persisted
+            // assistant message (Stop vs incoming token, deterministic).
+            if (cancelSignal.aborted) {
+              throw cancelledError();
+            }
             if (event.type === 'text') {
               assistantMessage.content += event.text;
               if (!streamingFlipped) {
@@ -615,6 +664,15 @@ export class MessagesService {
           }
           break; // stream ended cleanly
         } catch (error) {
+          // Cancellation is never retryable — it must not be routed into
+          // the fallback (a stopped turn stays stopped, on the model that
+          // was actually answering), nor classified as a provider failure.
+          if (
+            cancelSignal.aborted ||
+            (error instanceof ProviderError && error.kind === 'cancelled')
+          ) {
+            throw error;
+          }
           // Fallback decision — branch on the normalized kind ONLY.
           const retryable =
             error instanceof ProviderError && FALLBACK_ELIGIBLE_KINDS.has(error.kind);
@@ -655,6 +713,13 @@ export class MessagesService {
         }
       }
 
+      // Stop vs natural completion, resolved deterministically: if the abort
+      // landed at any point before this write, the turn is stopped — it can
+      // never become 'completed' afterwards.
+      if (cancelSignal.aborted) {
+        throw cancelledError();
+      }
+
       assistantMessage.status = 'completed';
       const saved = await this.messagesRepository.save(assistantMessage);
       this.generationRegistry.publishDone(messageId, saved);
@@ -668,6 +733,38 @@ export class MessagesService {
         outputChars: assistantMessage.content.length,
       });
     } catch (error) {
+      // A user Stop (cancelSignal abort) or a provider stream abort that the
+      // orchestrator classified as 'cancelled' is NEVER a failure: persist
+      // the partial row as 'interrupted' — the same honest terminal state as
+      // an orphaned generation — publish the terminal 'cancelled' event and
+      // skip fallback/retry entirely. Exactly one finalization per turn.
+      if (
+        cancelSignal.aborted ||
+        (error instanceof ProviderError && error.kind === 'cancelled')
+      ) {
+        this.logger.log(`Generation cancelled for message ${messageId}`);
+        assistantMessage.status = 'interrupted';
+        assistantMessage.errorMessage = null;
+        let savedStopped = assistantMessage;
+        try {
+          savedStopped = await this.messagesRepository.save(assistantMessage);
+        } catch (persistError) {
+          // DB failed while recording the stop — log and continue so
+          // attached clients still get the terminal event.
+          this.logger.error(`Failed to persist cancelled state: ${String(persistError)}`);
+        }
+        this.generationRegistry.publishCancelled(messageId, savedStopped);
+        completionResolve(savedStopped);
+        // A stopped turn really consumed tokens (if any arrived) — recorded
+        // like any interrupted turn, best-effort and exactly once (INV-7).
+        await this.usageService.recordTurnEnd(usageMessageId, {
+          outcome: 'interrupted',
+          inputTokens: providerUsage?.inputTokens ?? null,
+          outputTokens: providerUsage?.outputTokens ?? null,
+          outputChars: assistantMessage.content.length,
+        });
+        return;
+      }
       // Disconnect never lands here — it only unsubscribes. This is a real
       // AI/provider/DB failure, normalized to a ProviderError kind by the
       // adapter layer; branch on the kind only (never message text).
@@ -731,12 +828,92 @@ export class MessagesService {
   }
 
   /**
+   * User-initiated Stop (chat composer button) for the conversation's active
+   * generation. Ownership-validated: a caller can only ever stop a turn in
+   * their own conversation — never another user's generation.
+   *
+   *  - live generation   → its cancellation signal is aborted; the loop stops
+   *    consuming the provider stream and persists the partial row as
+   *    'interrupted' (never 'completed', never 'failed'). The endpoint then
+   *    awaits the loop's completion (bounded) so the response carries the
+   *    authoritative final row — if natural completion won the race, that
+   *    row is 'completed' and the client renders the full answer.
+   *  - orphaned pending/streaming row (server restarted mid-generation) →
+   *    honestly marked 'interrupted' so a deliberate stop stays stopped.
+   *  - nothing open      → `{ stopped: false }`; repeated Stop calls are
+   *    idempotent (aborting the same signal twice is a no-op) and never
+   *    touch completed/failed/interrupted rows.
+   *
+   * In-process scope matches the registry (and the reconnect design): a
+   * generation owned by another process instance is not reachable here.
+   */
+  async stopConversationGeneration(
+    userId: string,
+    conversationId: string,
+  ): Promise<{ stopped: boolean; message: Message | null }> {
+    await this.conversationsService.getOwned(userId, conversationId);
+
+    const openRows = await this.messagesRepository.find({
+      where: {
+        conversationId,
+        role: 'assistant',
+        status: In(['pending', 'streaming'] as MessageStatus[]),
+      },
+      order: { createdAt: 'DESC' },
+    });
+
+    let stopped = false;
+    let stoppedMessage: Message | null = null;
+    for (const row of openRows) {
+      const completion = this.generationRegistry.completion(row.id);
+      if (completion) {
+        this.generationRegistry.requestCancel(row.id);
+        // Deterministic settle: wait (bounded) for the loop to persist the
+        // terminal row — the stop must not report before the database
+        // agrees. On a pathological hang the bound elapses and the response
+        // simply omits the row; the DB still converges asynchronously.
+        const settled = await Promise.race([
+          completion,
+          new Promise<null>((resolve) => {
+            setTimeout(() => resolve(null), this.stopSettleTimeoutMs);
+          }),
+        ]);
+        if (!stoppedMessage) stoppedMessage = settled;
+      } else {
+        await this.markOrphanedInterrupted(row);
+        if (!stoppedMessage) stoppedMessage = row;
+      }
+      stopped = true;
+    }
+    return { stopped, message: stoppedMessage };
+  }
+
+  /**
+   * Honestly marks an orphaned pending/streaming row 'interrupted' so it is
+   * retryable and never looks "completed" while it is not. The usage row
+   * (created at acceptance) is reconciled to outcome='interrupted' — its
+   * partial output counts, since those tokens were really consumed. Shared
+   * by the reconnect stream and the Stop endpoint.
+   */
+  private async markOrphanedInterrupted(message: Message): Promise<void> {
+    message.status = 'interrupted';
+    message.errorMessage = 'Generation is no longer running (server restart).';
+    await this.messagesRepository.save(message);
+    await this.usageService.recordTurnEnd(message.id, {
+      outcome: 'interrupted',
+      inputTokens: null,
+      outputTokens: null,
+      outputChars: message.content.length,
+    });
+  }
+
+  /**
    * Recovery stream for a reconnecting client (refresh, new tab, restored
    * connection). Ownership-validated. Yields `snapshot` first (the full
    * content so far — the client replaces, never appends), then only the
    * remaining live deltas, then a terminal event. Never re-invokes the AI:
    *
-   *   - live generation   → snapshot + remaining deltas + done/failed
+   *   - live generation   → snapshot + remaining deltas + done/failed/cancelled
    *   - completed row     → snapshot + done (nothing regenerated)
    *   - failed row        → snapshot + failed terminal (Retry offered)
    *   - interrupted row   → snapshot + interrupted terminal (Retry offered)
@@ -766,18 +943,8 @@ export class MessagesService {
     if (!this.generationRegistry.isLive(messageId)) {
       if (message.status === 'pending' || message.status === 'streaming') {
         // Orphaned generation: mark it honestly so the row is retryable and
-        // never looks "completed" while it is not. The usage row (created at
-        // acceptance) is reconciled to outcome='interrupted' — its partial
-        // output counts, since those tokens were really consumed.
-        message.status = 'interrupted';
-        message.errorMessage = 'Generation is no longer running (server restart).';
-        await this.messagesRepository.save(message);
-        await this.usageService.recordTurnEnd(message.id, {
-          outcome: 'interrupted',
-          inputTokens: null,
-          outputTokens: null,
-          outputChars: message.content.length,
-        });
+        // never looks "completed" while it is not.
+        await this.markOrphanedInterrupted(message);
       }
       yield { type: 'snapshot', assistantMessage: { ...message } };
       if (message.status === 'completed') {
@@ -826,6 +993,12 @@ export class MessagesService {
             continue;
           } else if (event.type === 'done') {
             yield { type: 'done', assistantMessage: event.message };
+            return;
+          } else if (event.type === 'cancelled') {
+            // The user stopped this generation in another tab/window: the
+            // row carries its persisted 'interrupted' state — finalize
+            // without offering the network-recovery path.
+            yield { type: 'cancelled', assistantMessage: event.message };
             return;
           } else {
             yield {

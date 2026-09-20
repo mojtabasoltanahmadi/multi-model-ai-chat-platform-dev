@@ -427,6 +427,12 @@ export interface StreamEvents {
   onSources?: (payload: StreamSourcesPayload) => void;
   onDelta: (payload: { text: string }) => void;
   onDone: (payload: { assistantMessage: Message }) => void;
+  /**
+   * Terminal: this generation was stopped by the user (Stop button, possibly
+   * from another tab). `assistantMessage` is the persisted partial row
+   * (status 'interrupted') — a deliberate stop, never an error.
+   */
+  onCancelled?: (payload: { assistantMessage: Message }) => void;
   onError: (message: string) => void;
 }
 
@@ -499,6 +505,8 @@ export function streamChatMessage(
           events.onSources?.(parsed as StreamSourcesPayload);
         else if (event === 'delta') events.onDelta(parsed as { text: string });
         else if (event === 'done') events.onDone(parsed as { assistantMessage: Message });
+        else if (event === 'cancelled')
+          events.onCancelled?.(parsed as { assistantMessage: Message });
         // Terminal failure is emitted as `failed` by the backend; `error` is
         // kept as a defensive fallback for older payloads.
         else if (event === 'failed' || event === 'error')
@@ -530,6 +538,24 @@ export function streamChatMessage(
   return { abort: () => controller.abort() };
 }
 
+// ---- Stop the active generation (composer Stop button) ----
+
+/**
+ * Stops the conversation's active generation: the backend aborts the
+ * underlying provider stream and persists the partial assistant row as
+ * 'interrupted' (never 'completed', never 'failed'). Returns the
+ * authoritative final row — which is 'completed' when natural completion
+ * won the race. Idempotent; `stopped: false` when nothing was generating.
+ */
+export function stopConversationGeneration(
+  conversationId: string,
+): Promise<{ stopped: boolean; message: Message | null }> {
+  return api(`/conversations/${conversationId}/messages/stop`, {
+    method: 'POST',
+    body: {},
+  });
+}
+
 // ---- Reconnect / recovery stream (refresh, new tab, restored network) ----
 
 export interface ReconnectEvents {
@@ -541,6 +567,12 @@ export interface ReconnectEvents {
   onSources?: (payload: StreamSourcesPayload) => void;
   onDelta: (payload: { text: string }) => void;
   onDone: (assistantMessage: Message) => void;
+  /**
+   * Terminal: this generation was stopped by the user (Stop button, possibly
+   * from another tab). `assistantMessage` is the persisted partial row —
+   * finalize WITHOUT the network-recovery path (a stop stays stopped).
+   */
+  onCancelled?: (assistantMessage: Message) => void;
   /**
    * Terminal failure (generation failed, or was orphaned by a server
    * restart and honestly marked interrupted). `assistantMessage` is the
@@ -604,6 +636,8 @@ export function reconnectGenerationStream(
           events.onDelta(parsed as { text: string });
         } else if (event === 'done') {
           events.onDone(parsed.assistantMessage as Message);
+        } else if (event === 'cancelled') {
+          events.onCancelled?.(parsed.assistantMessage as Message);
         } else if (event === 'failed') {
           events.onFailed(
             (parsed.assistantMessage as Message | null) ?? null,

@@ -195,10 +195,13 @@ seams it relies on:
   → completed | interrupted | failed`. `pending` is persisted (not just
   in-memory) so a reload between POST and first delta still finds the row.
   `streaming` is in-memory only; only terminal transitions hit the DB.
-- **Disconnect vs failure.** The server disambiguates an `AbortError` by
-  asking `isClientDisconnected()` first. Client-initiated aborts
-  (network drop, tab close, Stop button) become `interrupted`; genuine
-  provider failures become `failed`. See
+- **Disconnect vs failure vs Stop.** A client disconnect only unsubscribes —
+  it never reaches the generation loop, which runs to `completed`/`failed`.
+  The Stop button is the ONE deliberate cancellation path:
+  `POST /conversations/:id/messages/stop` aborts the generation's
+  `AbortSignal`, the loop discards post-abort tokens and persists the partial
+  row as `interrupted` with a terminal `cancelled` event. Cancellation is
+  never classified as provider failure and never triggers the fallback. See
   [CONVERSATION_RESILIENCE.md §5](CONVERSATION_RESILIENCE.md#5-disconnect-vs-failure-disambiguation).
 - **Idempotency.** A `clientMessageId` on the body (or as the
   `Idempotency-Key` HTTP header) makes the POST safely retryable. Reused

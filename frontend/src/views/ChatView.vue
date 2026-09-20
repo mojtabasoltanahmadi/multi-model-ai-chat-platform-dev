@@ -17,6 +17,7 @@ import {
   fetchFileContent,
   streamChatMessage,
   reconnectGenerationStream,
+  stopConversationGeneration,
   uploadConversationFile,
   type StreamHandle,
 } from '../api/client';
@@ -814,6 +815,13 @@ async function send(
         Object.assign(streamingRow, assistantMessage);
         finish();
       },
+      onCancelled: ({ assistantMessage }) => {
+        // The generation was stopped by the user (this or another client):
+        // finalize with the persisted partial row. A deliberate stop is
+        // never an error and never enters the network-recovery path.
+        Object.assign(streamingRow, assistantMessage);
+        finish();
+      },
       onError: (message) => {
         if (accumulated.length > 0) {
           // The live feed dropped AFTER deltas arrived (network loss, or the
@@ -886,6 +894,12 @@ function recoverGeneration(row: Message) {
       void scrollToBottom();
     },
     onDone: (assistantMessage) => {
+      Object.assign(reactiveRow, assistantMessage);
+      finish();
+    },
+    onCancelled: (assistantMessage) => {
+      // Stopped in another tab: apply the persisted partial row and finalize
+      // WITHOUT the network-recovery path — a deliberate stop stays stopped.
       Object.assign(reactiveRow, assistantMessage);
       finish();
     },
@@ -962,23 +976,49 @@ function detachStream() {
   streamPhase.value = null;
 }
 
+/**
+ * Stop button: actually stops the active generation, not merely detaches the
+ * view. The HTTP stream is aborted locally AND the backend is asked to cancel
+ * the underlying provider stream, persist the partial row as 'interrupted'
+ * and finalize deterministically. A stopped turn stays stopped until Retry —
+ * it never enters the network-recovery path and a refresh reads the honest
+ * 'interrupted' state from the database instead of resuming.
+ */
 function stopStreaming() {
-  streamHandle.value?.abort();
-  // Aborting only detaches THIS view from the live stream — the generation
-  // keeps running server-side and its full answer is persisted. The row is
-  // shown locally as detached; the next load of this conversation reads the
-  // final state from the database (or re-attaches if still generating).
+  // Guard: nothing active (already stopped / no generation) — safe no-op.
+  const activeIdNow = activeId.value;
   const row = streamingMessage.value;
+  if (!activeIdNow || !streamHandle.value) return;
+  streamHandle.value.abort();
+  streamHandle.value = null;
+  streaming.value = false;
+  activeStreamRowId.value = null;
+  inflightClientMessageId.value = null;
+  searchStatus.value = null;
+  streamPhase.value = null;
+  // Keep every token already rendered and mark the row locally interrupted so
+  // the UI is never stuck in the streaming/loading state, even before the
+  // backend responds. The server will confirm/patch this via the stop result
+  // (or a concurrent `cancelled` terminal on the still-open reconnect feed).
   if (row) {
     row.status = 'interrupted';
     row.errorMessage = null;
   }
-  streaming.value = false;
-  streamHandle.value = null;
-  activeStreamRowId.value = null;
-  inflightClientMessageId.value = null;
-  searchStatus.value = null;
   void loadConversations();
+  // Best-effort backend cancellation; awaited but not blocking the UI. When
+  // natural completion won the race the result is 'completed' and we promote
+  // it. A failure here (network) leaves the local 'interrupted' row — the
+  // stop still happened locally and the DB converges via the cancelled feed.
+  stopConversationGeneration(activeIdNow)
+    .then(({ message }) => {
+      if (message) {
+        const live = messages.value.find((m) => m.id === message.id);
+        if (live) Object.assign(live, message);
+      }
+    })
+    .catch(() => {
+      /* best-effort — local state already reflects the stop */
+    });
 }
 
 // ---- scrolling: never yank the user back up ----

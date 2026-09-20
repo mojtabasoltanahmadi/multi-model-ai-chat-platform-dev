@@ -45,11 +45,15 @@ info:
     On the `error` event the backend has already persisted exactly one
     assistant message with `status = "failed"` containing any partial content.
 
-    Client disconnects (network drop, tab close, Stop button) do NOT emit an
-    `error` event — the disconnector cannot receive it. The server persists
-    the partial answer with `status = "interrupted"`; the next `GET` on the
-    conversation surfaces the row as a Retry target. See
-    `docs/CONVERSATION_RESILIENCE.md` §5.
+    Client disconnects (network drop, tab close) do NOT emit an `error` event
+    — the disconnector cannot receive it, and disconnect ≠ failure: the
+    generation keeps running server-side. The Stop button is different — it
+    calls `POST /conversations/{id}/messages/stop`, which aborts the provider
+    request, persists the partial answer with `status = "interrupted"`
+    (`errorMessage = null`) and emits a terminal `cancelled` event to every
+    other attached stream. A stopped turn is never auto-resumed; the next
+    `GET` on the conversation surfaces the row as a Retry target. See
+    `docs/CONVERSATION_RESILIENCE.md` §5/§5.1.
 
     **Business rules not expressible as schema constraints**
 
@@ -263,7 +267,8 @@ paths:
 
         Then the stream opens (see the Streaming section in the API info):
         `meta` → (`search_started` → `search_completed` → `sources`)? →
-        `status`* → `delta`* → `done` | `failed`. Exactly one assistant message
+        `status`* → `delta`* → `done` | `cancelled` | `failed`. Exactly one
+        assistant message
         is persisted per turn in every outcome (INV-5). The provider request is
         aborted after the configured timeout (A-8, default 60s) and surfaces as
         the generic `failed` terminal event — unless the model carries a
@@ -366,6 +371,74 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /conversations/{conversationId}/messages/stop:
+    post:
+      tags: [Chat]
+      operationId: stopGeneration
+      summary: Stop the conversation's active AI generation (Stop button)
+      description: |
+        Cancels the conversation's in-flight generation end-to-end: aborts the
+        underlying provider request, discards every token that arrives after
+        the abort, persists the partial assistant row with
+        `status = "interrupted"` (`errorMessage = null`), and emits a terminal
+        `cancelled` SSE event to every attached stream.
+
+        - Idempotent: repeated calls never touch completed/failed/interrupted
+          rows and return `stopped: false` once nothing is open.
+        - Ownership-checked — a caller can only stop a generation in their own
+          conversation, never another user's.
+        - Cancellation is never classified as provider failure and never
+          routed into the single-hop fallback (a stopped turn stays stopped).
+        - The response waits (bounded, `AI_STOP_SETTLE_TIMEOUT_MS`, default
+          5s) for the deterministic terminal row; if natural completion won
+          the race, `message.status` is `"completed"`.
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      responses:
+        '200':
+          description: |
+            Stop result. `stopped` is false when the conversation had no open
+            generation. `message` is the authoritative final assistant row
+            (or null when nothing was stopped).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stopped, message]
+                properties:
+                  stopped:
+                    type: boolean
+                  message:
+                    oneOf:
+                      - $ref: '#/components/schemas/Message'
+                      - type: 'null'
+              example:
+                stopped: true
+                message:
+                  id: 17d53156-1e46-4c61-b444-3ba9506b2d0b
+                  conversationId: 3f7a9529-fcc2-4d6d-9723-ac6d69f928af
+                  role: assistant
+                  content: 'سلام! این بخش'
+                  status: interrupted
+                  errorMessage: null
+                  modelId: 84bc6ca9-b6c2-485f-828f-a48c32524759
+                  clientMessageId: null
+                  createdAt: '2026-09-20T15:38:03.352Z'
+        '400':
+          description: Invalid conversation id (UUID shape).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Unknown or foreign conversation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /conversations/{conversationId}/messages/{messageId}/stream:
     get:
       tags: [Chat]
@@ -377,7 +450,9 @@ paths:
         same conversation. Never re-invokes the AI:
 
         - live generation → `StreamSnapshotEvent` + remaining
-          `StreamDeltaEvent`s + `StreamDoneEvent`/`StreamFailedEvent`
+          `StreamDeltaEvent`s + `StreamDoneEvent`/`StreamFailedEvent`/
+          `StreamCancelledEvent` (the latter when the generation was stopped
+          by the user, e.g. from another tab)
         - `completed` row → snapshot + done (pure replay)
         - `failed`/`interrupted` row → snapshot + `StreamFailedEvent`
         - `pending`/`streaming` row with NO live generation (server restarted
@@ -399,7 +474,7 @@ paths:
         '200':
           description: |
             SSE stream (`text/event-stream`): `snapshot` → `delta`* →
-            `done` | `failed`.
+            `done` | `cancelled` | `failed`.
           content:
             text/event-stream:
               schema:

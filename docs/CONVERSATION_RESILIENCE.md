@@ -21,7 +21,7 @@ with a usable conversation on their next visit:
 | 3 | User opens a second tab on the same conversation | Second tab joins the SAME live generation (snapshot + remaining deltas). It cannot duplicate the user's message, fabricate AI text, or start a second generation. |
 | 4 | Internet drops mid-stream | The generation continues server-side. The client keeps the tokens already delivered, marks the row locally `interrupted` (a view hint, not a DB state), and when connectivity returns the row auto-re-attaches to the live generation and finishes. |
 | 5 | Provider errors out (timeout, 5xx, refused connection) | Server persists the partial answer with `status='failed'` and an internal `errorMessage`. The client gets a generic, non-leaky message. Retry produces a fresh assistant row. |
-| 6 | User hits Stop (abort) | This view detaches from the live stream; the generation still completes server-side and is persisted. The row renders locally as `interrupted`; a reload or reconnect shows the real (completed) state. |
+| 6 | User hits Stop (abort) | The view detaches from the live stream AND the generation is cancelled end-to-end: the HTTP stream is aborted locally, `POST /conversations/:id/messages/stop` aborts the underlying provider stream, and the partial answer is persisted with `status='interrupted'`. A stopped turn stays stopped — refresh/reconnect never resumes it; Retry re-sends deliberately. |
 | 7 | User double-clicks Send | The second click is rejected (`streaming.value === true` guard on the client). |
 | 8 | Network blip causes the same POST to retry | Backend recognizes the idempotency key, reuses the user row, streams a fresh assistant. No duplicate user bubble. |
 | 9 | Server restarts mid-generation | The in-memory generation is lost — no fake resume. The orphaned `pending`/`streaming` row is honestly marked `interrupted` on the next reconnect attempt and offered for retry. |
@@ -65,8 +65,8 @@ The `messages.status` column is a small enum on the assistant role:
 └────────┘ └──────────┘    └──────────┘
   success    orphaned by a     provider / network
              server restart,    failure (failed event
-             or the user's      with generic message)
-             view detached
+             or a user Stop     with generic message)
+             (cancelled event)
 ```
 
 `pending` is written **before** the SSE `meta` event is emitted — a reload
@@ -79,8 +79,8 @@ interval of tokens. The live bytes in flight are the SSE deltas, not the DB.
 **A client disconnect never writes `interrupted`.** Disconnect only removes
 a subscriber; the generation always runs to `completed` or `failed`. The
 `interrupted` status is reserved for genuinely unfinished generations:
-orphaned rows after a server restart, and the local view hint when the user
-detaches (Stop) or a transport drop severs a live feed.
+orphaned rows after a server restart, and a generation the user explicitly
+stopped with the Stop button (partial content preserved, Retry offered).
 
 `interrupted` vs `failed` is a meaningful distinction (see §5).
 
@@ -143,6 +143,47 @@ contract.
 
 The provider timeout's `AbortError` still lands in the failure branch above
 (it is a provider failure, not a disconnect) and persists `failed`.
+
+### 5.1 User Stop (deliberate cancellation)
+
+Stop is the one path that DOES reach the generation loop — through an
+explicit channel, never through a disconnect:
+
+```
+Stop button ──▶ POST /conversations/:id/messages/stop
+                    │  (ownership-checked; idempotent)
+                    ▼
+     GenerationRegistry.requestCancel(messageId)
+                    │  aborts the generation's AbortSignal
+                    ▼
+     runGeneration checkpoints: any token arriving after the
+     abort is DISCARDED (never published, never persisted)
+                    │
+                    ▼
+     partial row persisted as 'interrupted' (errorMessage=null)
+     terminal `cancelled` event → all attached streams finalize
+     usage row → outcome 'interrupted' (tokens were consumed)
+```
+
+Invariants:
+
+- A cancelled generation can never become `completed` (the completion
+  checkpoint re-checks the abort signal right before the final write, so
+  Stop-vs-completion resolves deterministically in favor of Stop).
+- Cancellation is never classified as failure and never routed into the
+  single-hop provider fallback (a stopped turn stays stopped).
+- The orchestrator (`AiProviderService`) reclassifies an abort that the
+  CALLER initiated into `ProviderError('cancelled')`; shutdown and adapter
+  timeouts remain `'timeout'` — user cancellation and provider failure can
+  not be confused.
+- The stop response waits (bounded, `AI_STOP_SETTLE_TIMEOUT_MS`, 5s) for the
+  loop's deterministic terminal row, so the client can render the
+  authoritative DB state immediately. If natural completion won the race,
+  the row is `completed` and the full answer is shown.
+- Repeated Stop calls are safe: after the row turns terminal, the lookup
+  finds nothing open and returns `{ stopped: false }`.
+- Stop never sets the frontend's network-recovery marker — a stopped turn
+  is never auto-resumed on reconnect or refresh.
 
 ---
 
@@ -227,7 +268,7 @@ the request will surface the same generic error a failed stream would.
 
 | Layer | Tool | What it covers |
 |---|---|---|
-| Service (`messages.service.spec.ts`) | Jest + mocked repository | Detached generation lifecycle, disconnect-completes, throttled incremental persistence, reconnect snapshot+remaining-delta equality, completed-replay-without-AI, orphan honesty, idempotency reuse/conflict, replay, one-row-per-turn invariant. 21 specs. |
+| Service (`messages.service.spec.ts`) | Jest + mocked repository | Detached generation lifecycle, disconnect-completes, throttled incremental persistence, reconnect snapshot+remaining-delta equality, completed-replay-without-AI, orphan honesty, idempotency reuse/conflict, replay, one-row-per-turn invariant, **Stop/cancellation: partial persisted as interrupted, post-abort tokens discarded, no fallback routing, stop-vs-completion race, cancellation-after-completion no-op, orphan stop, ownership check, disconnect ≠ stop**. |
 | HTTP smoke (`scripts/smoke-test.mjs`) | Node fetch | Full black-box: auth, ownership, plan authorization, model CRUD, **status='failed' + failed SSE event**, **meta carries assistantMessage + replay=false**, **clientMessageId reuse**, **Idempotency-Key header**, **content-mismatch → 400**. 75 checks. |
 | Live resilience (`scripts/resilience-test.mjs`) | Node fetch + real aborts | **Detach-and-complete**: abort mid-stream → generation still completes; reconnect replay of completed rows creates no new rows; two clients on one live generation (snapshot + remaining deltas, no dup/missing tokens); foreign reconnect → 404; retry/replay row counts; Idempotency-Key round-trip; abort-before-send creates no rows. 28 checks. |
 | Vite dev server smoke | `curl` against the SPA | Routes mount, ChatView bundle includes the new imports. |

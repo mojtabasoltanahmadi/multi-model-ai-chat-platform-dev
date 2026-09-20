@@ -221,6 +221,39 @@ progress, and the row finishes as `status: "completed"`. A client that went away
 re-attach via the reconnect endpoint below and receive the rest of the answer without
 regenerating anything.
 
+### Stop (user-initiated cancellation)
+
+`POST /conversations/:conversationId/messages/stop` — the composer's Stop button.
+Unlike a disconnect, this DOES cancel the generation end-to-end: the backend aborts
+the underlying provider stream, discards any token arriving after the abort, persists
+the partial assistant row with `status: "interrupted"` (`errorMessage: null`), and
+publishes a terminal `cancelled` event to every attached stream.
+
+```
+200 OK
+{ "stopped": true, "message": { status: "interrupted", content: "<partial>", ... } }
+```
+
+- `stopped: false` (with `message: null`) when nothing is generating — the call is
+  idempotent and never touches completed/failed/interrupted rows.
+- The response waits (bounded) for the deterministic terminal row: if natural
+  completion won the race, `message.status` is `"completed"` and the client renders
+  the full answer.
+- Ownership-checked (404/403 for foreign conversations); a user can never stop
+  another user's generation.
+- Cancellation is never classified as failure and never triggers the fallback.
+
+The `cancelled` terminal SSE event (both the send stream and the reconnect stream —
+e.g. the generation was stopped from another tab):
+
+```
+event: cancelled
+data: { "assistantMessage": { status: "interrupted", ... } }
+```
+
+Clients finalize from this row WITHOUT the network-recovery path: a deliberate stop
+stays stopped until the user presses Retry.
+
 The full state machine and disambiguation rules live in
 [CONVERSATION_RESILIENCE.md](CONVERSATION_RESILIENCE.md).
 
@@ -250,6 +283,8 @@ data: { "text": "chunk" }      // the remaining deltas, never overlapping the sn
 // always exactly one terminal event:
 event: done
   → { "assistantMessage": { status: "completed", ... } }
+event: cancelled
+  → { "assistantMessage": { status: "interrupted", ... } }   // user stopped the generation
 event: failed
   → { "assistantMessage": { status: "failed" | "interrupted", ... }, "message": "<generic>" }
 ```
@@ -264,7 +299,7 @@ Recovery behavior by row state:
 | Live generation in progress | `snapshot` + remaining `delta`s + terminal. The client joins the **same** generation — the AI is never re-invoked. |
 | `completed` | `snapshot` + `done`. Pure replay, no AI call. |
 | `failed` | `snapshot` + `failed` (generic message). Retry is a user action. |
-| `interrupted` (user pressed Stop) | `snapshot` + `failed` (generic message). Retry is a user action. |
+| `interrupted` (user pressed Stop) | `snapshot` + `cancelled` terminal (partial row). Retry is a user action; the stop is never auto-resumed. |
 | `pending`/`streaming` with **no** live generation (server restarted mid-generation) | The row is honestly marked `interrupted` in the DB, then `snapshot` + `failed` with a "you can retry" message. No fake resume. |
 
 Snapshot/delta ordering guarantee: the server subscribes the reconnecting client

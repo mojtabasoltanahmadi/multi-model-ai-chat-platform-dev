@@ -268,8 +268,10 @@ user's intent and without orphaning AI text. Full spec:
   (≤ 64 chars) for every fresh send.
 - `send(content, { clientMessageId? })` accepts a pre-existing id for Retry —
   the backend treats it as a replay.
-- `stopStreaming()` marks the placeholder `interrupted` locally and triggers
-  `loadMessages()` to reconcile with the DB.
+- `stopStreaming()` aborts the HTTP stream locally, marks the partial row
+  `interrupted`, and calls `POST …/messages/stop` so the backend cancels the
+  underlying provider generation end-to-end (the stop result promotes the
+  authoritative final row).
 - Offline banner slides in under the chat header with a pulsing red dot
   (`role="status"` `aria-live="polite"`).
 
