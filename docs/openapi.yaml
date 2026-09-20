@@ -241,6 +241,52 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /conversations/{conversationId}/model:
+    patch:
+      tags: [Conversations]
+      operationId: setConversationModel
+      summary: Persist the conversation's selected model
+      description: |
+        Stores (or clears) the conversation's explicitly selected model — the
+        value clients restore after a refresh or a conversation switch, in
+        precedence over the system default. The model must pass the same
+        checks a chat send enforces (exists, active, allowed for the caller's
+        plan; the thinking gate is waived for admins). `modelId: null` clears
+        the explicit selection so the conversation follows the default again.
+        Foreign conversations respond with 404 (no existence leak).
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [modelId]
+              properties:
+                modelId:
+                  type: string
+                  format: uuid
+                  nullable: true
+                  description: Model id to persist, or null to clear the explicit selection.
+      responses:
+        '200':
+          description: Updated conversation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conversation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /conversations/{conversationId}/messages:
     post:
       tags: [Chat]
@@ -1478,6 +1524,15 @@ components:
           type: string
           format: uuid
           description: Owning user (INV — exactly one owner per conversation).
+        modelId:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            The conversation's explicitly selected model (null = none chosen;
+            sends then resolve the system default). Written only by
+            PATCH /conversations/{conversationId}/model — never recomputed
+            from the default — so clients restore it after a refresh.
         createdAt:
           type: string
           format: date-time

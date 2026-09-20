@@ -22,6 +22,12 @@ export interface Conversation {
   id: string;
   title: string;
   userId: string;
+  /**
+   * The conversation's explicitly selected model (null = none persisted yet;
+   * sends then use the system default). Persisted server-side, so a refresh
+   * or a conversation switch restores this choice over the global default.
+   */
+  modelId: string | null;
   createdAt: string;
   updatedAt: string;
 }
