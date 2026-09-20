@@ -65,6 +65,30 @@ export class UsageService {
   }
 
   /**
+   * Reflects a single-hop provider fallback on the open usage row (day-7-8
+   * contract §12/§22.6): tokens and cost must attribute to the model that
+   * actually answered, not the one originally requested. Called at most once
+   * per turn, BEFORE the terminal update (which re-reads the row). Best-
+   * effort — accounting must never break the chat turn.
+   */
+  async recordFallbackModel(
+    messageId: string,
+    model: Pick<AiModel, 'id' | 'provider'>,
+  ): Promise<void> {
+    try {
+      await this.usageRepository.update(
+        { messageId },
+        { modelId: model.id, provider: model.provider },
+      );
+      this.logger.log(
+        `TurnFallbackModel messageId=${messageId} modelId=${model.id} provider=${model.provider}`,
+      );
+    } catch (error) {
+      this.logger.error(`Usage fallback-model update failed for ${messageId}: ${String(error)}`);
+    }
+  }
+
+  /**
    * Terminal update — exactly once per turn, best-effort. Tokens come from
    * the provider's usage event when it reported one; otherwise both token
    * counts are estimated from characters (chars/4, documented heuristic) and

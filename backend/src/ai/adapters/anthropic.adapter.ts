@@ -126,6 +126,13 @@ export class AnthropicAdapter implements ProviderAdapter {
           inputTokens = Number(parsed?.message?.usage?.input_tokens ?? 0);
         } else if (parsed?.type === 'message_delta') {
           outputTokens = Number(parsed?.usage?.output_tokens ?? 0);
+        } else if (parsed?.type === 'content_block_start') {
+          // Extended-thinking block started: signal the phase (safe status
+          // label only) — the thinking channel itself is never forwarded
+          // (INV-12). `thinking_delta` content below stays dropped.
+          if (parsed?.content_block?.type === 'thinking') {
+            yield { type: 'status', status: 'thinking' };
+          }
         } else if (parsed?.type === 'content_block_delta') {
           // Only the public text channel is forwarded; thinking_delta and any
           // other channel type are silently dropped (INV-12).

@@ -1,21 +1,37 @@
 import { Injectable } from '@nestjs/common';
 import type { Message } from './message.entity';
+import type { MessageSource } from '../websearch/websearch.types';
+
+/**
+ * Execution phases streamed to clients (day-7-8 contract §10/§11) — safe
+ * status labels about the system's own work, never model output and never
+ * chain-of-thought. Closed set.
+ */
+export type GenerationStatus = 'thinking' | 'generating';
 
 /**
  * Events fanned out to every subscriber of a live generation.
  *  - delta: one new text chunk (subscriber received it AFTER subscribing,
  *           so it has not been included in any snapshot the subscriber got)
+ *  - status: execution phase (`thinking` before the first token, `generating`
+ *           at the first delta; `detail: 'fallback'` marks the single-hop
+ *           provider switch). Ephemeral — never persisted or replayed.
  *  - search_started:   the turn's opt-in web search began (transient)
  *  - search_completed: the search finished; `resultCount` hits were kept,
  *           `warning` carries the safe degrade notice (null on success)
+ *  - sources: the turn's web-search citations, streamed once right after the
+ *           search persisted them (data event — also forwarded on reconnect;
+ *           clients replace their copy)
  *  - done:  generation finished; `message` is the final persisted row
  *  - failed: generation failed; `message` is the persisted row (status
  *           'failed'), `clientMessage` is the safe user-facing text
  */
 export type GenerationEvent =
   | { type: 'delta'; text: string }
+  | { type: 'status'; status: GenerationStatus; detail?: string }
   | { type: 'search_started' }
   | { type: 'search_completed'; resultCount: number; warning: string | null }
+  | { type: 'sources'; sources: MessageSource[] }
   | { type: 'done'; message: Message }
   | { type: 'failed'; message: Message; clientMessage: string };
 
@@ -63,6 +79,15 @@ export class GenerationRegistry {
     return () => generation.subscribers.delete(subscriber);
   }
 
+  /** Transient execution-phase narration (thinking/generating/fallback). */
+  publishStatus(messageId: string, status: GenerationStatus, detail?: string): void {
+    const generation = this.generations.get(messageId);
+    if (!generation) return;
+    for (const subscriber of generation.subscribers) {
+      subscriber({ type: 'status', status, detail });
+    }
+  }
+
   /** Transient web-search lifecycle for subscribers of the initial send. */
   publishSearchStarted(messageId: string): void {
     const generation = this.generations.get(messageId);
@@ -77,6 +102,15 @@ export class GenerationRegistry {
     if (!generation) return;
     for (const subscriber of generation.subscribers) {
       subscriber({ type: 'search_completed', resultCount, warning });
+    }
+  }
+
+  /** Streams the turn's citations once, right after they were persisted. */
+  publishSources(messageId: string, sources: MessageSource[]): void {
+    const generation = this.generations.get(messageId);
+    if (!generation) return;
+    for (const subscriber of generation.subscribers) {
+      subscriber({ type: 'sources', sources });
     }
   }
 

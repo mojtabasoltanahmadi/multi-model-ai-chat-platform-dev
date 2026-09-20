@@ -872,3 +872,116 @@ WebSocket handshakes need `suppress_origin`; localStorage-only theme overrides
 are silently overridden by the server preference on reload (by design) —
 screenshot passes must set the SERVER preference; the E2E test user was
 deleted from the database afterwards.
+
+## Stage 20 — Day 7–8 completion audit: provider fallback, execution phases, sources streaming, capability enforcement (2026-09-20, UNCOMMITTED)
+
+Audit-then-complete pass over the whole Day 7–8 surface (the requirement →
+implementation matrix, invariants and fixes below are recorded in
+`docs/architecture/day-7-8-decisions.md` as the Stage 20 status note). The
+provider abstraction itself audited clean: `AiProviderService` is a pure
+Strategy map over `ProviderAdapter`, four adapters normalize every failure to
+the closed `ProviderErrorKind` set, and no provider-specific branching leaks
+into the chat orchestration — preserved as-is.
+
+What was missing and is now implemented:
+
+- **Single-hop provider fallback (contract §12).** `ai_models.fallback_model_id`
+  (self-FK, ON DELETE SET NULL; DB_SYNCHRONIZE per repo convention) + admin
+  DTO/service rules (unknown/inactive/self/less-accessible → 400) + the
+  fallback selector and «مدل جایگزین» marker in `AdminModelPanel`/`ModelTable`.
+  Runtime: a retryable kind (`timeout`/`rate-limit`/`unavailable`) failing
+  BEFORE the first published delta restarts the turn once on the fallback —
+  attempted-model tracking makes `A→B→A` impossible, accessibility (plan,
+  allowlist, thinking feature) is re-checked fresh, the assistant row and the
+  usage row are re-attributed to the model that actually answered
+  (`UsageService.recordFallbackModel`, cost follows the fallback's pricing),
+  and the switch is announced via `status {generating, detail:'fallback'}`.
+  Post-delta deaths never fall back (no partial-text splicing, INV-9).
+- **Execution phases (contract §10/§11).** `runGeneration` narrates
+  `status {thinking}` before the provider call and `status {generating}` at
+  the first delta; adapters emit `thinking` when a provider reasoning channel
+  opens (Anthropic thinking block, OpenAI-compatible `reasoning_content`,
+  Gemini `thought` parts) — label only, reasoning content stays stripped
+  (INV-12). The mock adapter stays a pure text stream so the E2E lifecycle is
+  deterministic. Previously `status` ProviderEvents were explicitly ignored.
+- **`sources` SSE event (contract §11).** Citations stream once right after
+  they persist, before the first delta, and are forwarded to reconnecting
+  subscribers; the terminal row still echoes them. Frontend renders live
+  chips during streaming (`MessageItem` gate relaxed) — previously sources
+  were invisible until `done`.
+- **Server-side capability + availability enforcement (contract §8/§16).**
+  `webSearch: true` on a model without `web-search` → pre-flight 400
+  («این مدل از جستجوی وب پشتیبانی نمی‌کند.»); search while the global switch
+  is off → pre-flight 503 (was silently ignored — the user could believe a
+  search happened). The composer's search toggle is disabled for incapable
+  models (`webSearchAvailable` prop) and auto-resets on model switch.
+- **`GET /models` plan-aware (drift fix).** The picker read a hard-coded
+  `'free'` tier after the billing merge; it now resolves the caller's tier
+  from `EntitlementsService` (fresh per request), so premium users see premium
+  models again (send-path enforcement was already correct).
+- **`meta.webSearch`** — the server's own decision on the search phase rides
+  the meta event; the client flag alone is never treated as proof.
+
+Frontend streaming sync: `client.ts` parses `status`/`sources` on both the
+send and reconnect streams (optional `onStatus`/`onSources`, additive —
+unknown events still ignored); `ChatView` keeps a backend-driven `streamPhase`
+(«در حال تفکر…» in the composer status line), toasts «مدل جایگزین استفاده شد»
+on the fallback detail, and assigns live sources to the streaming row.
+
+Docs: `docs/API.md` (status/sources events, fallback section, pre-flight 400/
+503 rows, admin fallbackModelId rules, plan-aware picker), `docs/openapi.yaml`
+(webSearch, 429/503, fallbackModelId, event schemas), the Stage 20 status note
+in `day-7-8-decisions.md` (incl. the agreed naming amendment:
+`search_started`/`search_completed` stay instead of `status: searching`).
+
+Verification: backend Jest **398/398** (35 suites; 29 new — fallback policy,
+A→B→A impossibility, post-delta no-fallback, non-retryable fail-fast,
+fallback accessibility, status/sources ordering, capability 400, 503,
+`meta.webSearch`, adapter thinking-label tests for all three reasoning
+channels, admin fallback rules, `resolveFallbackCandidate` matrix);
+`nest build` clean; `vue-tsc` + `vite build` clean. Live E2E against real
+Postgres: new `scripts/fallback-resilience-test.mjs` **33/33** (phase order,
+fallback hop + attribution + no-duplicate-text, bounded chain, all-providers-
+fail, capability 400 pre-stream, keyless-search degradation, admin fallback
+rules), `smoke-test.mjs` **85/85**, `resilience-test.mjs` **28/28** —
+existing Day 1–6 behavior unchanged. `quota-test.mjs` **23/25**: the 2
+failures are PRE-EXISTING on `develop` (the plan-upgrade section still
+expects `users.plan` to drive access; the Day 9-10 billing merge reads
+entitlements from subscriptions instead — billing-test.mjs covers the real
+flow; untouched by this stage, see git status).
+
+Gotchas: `runForTurn`'s `disabled` branch is now only defense-in-depth (the
+503 fires pre-flight); the orchestrator skips the `thinking` label on a
+fallback attempt so the fallback note isn't immediately overwritten; fallback
+cost uses the fallback model's pricing because the usage row's model is
+updated at switch time (before the terminal update re-reads it).
+
+### Serper 403 diagnosis + key hardening (2026-09-20, same working tree)
+
+Live-diagnosed the reported `Serper request rejected (HTTP 403)` / `errorType=unauthorized`
+loop. Root cause is ENVIRONMENTAL, not code and not the key: `google.serper.dev` is served
+behind Google's front end, and from this network the edge answers with a generic HTML
+«403 Forbidden — Your client does not have permission to get URL» page BEFORE Serper's
+application ever evaluates the key. Evidence: `GET /` (no auth) returns the same HTML 403;
+the same request with a deliberately invalid key returns it too; a browser User-Agent
+changes nothing; other foreign API hosts (api.openai.com, generativelanguage.googleapis.com)
+time out entirely; no system/env proxy exists. Even a perfectly valid key over this egress
+route will always 403 — the server needs a VPN/proxy egress route (undici `ProxyAgent`
+behind a `WEB_SEARCH_PROXY_URL` env is the candidate follow-up; NOT added now — no proxy
+was available on this machine to verify the path end to end).
+
+Hardening landed in `serper.provider.ts` (architecture and degradation untouched —
+`WebSearchService` still degrades via `errorType='unauthorized'` with the same Persian
+warning): `normalizeApiKey` (trims whitespace incl. CRLF from hand-edited `.env` files,
+strips ONE matching pair of surrounding quotes) applied on every `apiKey` read;
+`onModuleInit` logs key PRESENCE as a masked fingerprint only (`SERPER KEY LOADED:
+0293a***** (len=40)` / `SERPER KEY MISSING`); the 401/403 warn now carries the masked
+fingerprint and distinguishes the two 403 classes by content-type — JSON body ⇒ Serper
+rejected the key, HTML body ⇒ «request blocked BEFORE Serper (network/IP edge block);
+the API key was never evaluated». Verified: websearch specs 27/27 (8 new — normalization,
+masking, HTML-edge classification, boot logs assert the full key never appears in log
+payloads), full backend Jest 406/406, live boot log shows the masked load line, and a live
+`webSearch: true` turn completes with the unchanged degradation warning.
+
+Docs: `docs/API.md` (web-search env bullet — masked boot log, key normalization, and the
+JSON-vs-HTML 403 semantics).

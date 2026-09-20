@@ -35,13 +35,17 @@ describe('MessagesService — chat turn lifecycle', () => {
     getOwnedWithMessages: jest.Mock;
     renameTitle: jest.Mock;
   };
-  let modelsService: { resolveChatModel: jest.Mock };
+  let modelsService: { resolveChatModel: jest.Mock; resolveFallbackCandidate: jest.Mock };
   let aiProviderService: { streamChat: jest.Mock };
   let filesService: { getReadyContext: jest.Mock };
   let webSearchService: { isEnabled: jest.Mock; runForTurn: jest.Mock };
   let entitlementsService: { resolveForUser: jest.Mock };
   let quotaService: { assertQuota: jest.Mock };
-  let usageService: { recordTurnStart: jest.Mock; recordTurnEnd: jest.Mock };
+  let usageService: {
+    recordTurnStart: jest.Mock;
+    recordTurnEnd: jest.Mock;
+    recordFallbackModel: jest.Mock;
+  };
 
   const setup = ({
     history = [],
@@ -66,6 +70,9 @@ describe('MessagesService — chat turn lifecycle', () => {
     };
     modelsService = {
       resolveChatModel: jest.fn().mockResolvedValue({ id: 'model-1', name: 'Mock', provider: 'mock', capabilities: [] }),
+      // Only consulted when a model actually declares a fallback AND the
+      // provider failed with a retryable kind before the first delta.
+      resolveFallbackCandidate: jest.fn().mockResolvedValue(null),
     };
     messagesRepository = createMockRepository();
 
@@ -106,7 +113,11 @@ describe('MessagesService — chat turn lifecycle', () => {
     // Entitlement/quota/usage collaborators default to the permissive path.
     entitlementsService = { resolveForUser: jest.fn().mockResolvedValue(entitlement()) };
     quotaService = { assertQuota: jest.fn().mockResolvedValue(undefined) };
-    usageService = { recordTurnStart: jest.fn().mockResolvedValue(undefined), recordTurnEnd: jest.fn().mockResolvedValue(undefined) };
+    usageService = {
+      recordTurnStart: jest.fn().mockResolvedValue(undefined),
+      recordTurnEnd: jest.fn().mockResolvedValue(undefined),
+      recordFallbackModel: jest.fn().mockResolvedValue(undefined),
+    };
 
     registry = new GenerationRegistry();
     service = new MessagesService(
@@ -780,6 +791,17 @@ describe('MessagesService — chat turn lifecycle', () => {
 
   it('admins bypass feature entitlements but not model allowlist/state checks', async () => {
     setup();
+    // The global search switch is platform state (503 when off, admin
+    // included); THIS test exercises the plan-feature bypass, so the switch
+    // is on. The model must itself be web-search capable — capability is a
+    // model-state check that admins do NOT bypass.
+    webSearchService.isEnabled.mockReturnValue(true);
+    modelsService.resolveChatModel.mockResolvedValue({
+      id: 'model-1',
+      name: 'Searcher',
+      provider: 'mock',
+      capabilities: ['web-search'],
+    });
     entitlementsService.resolveForUser.mockResolvedValue(
       entitlement({
         tier: 'free',
@@ -915,6 +937,249 @@ describe('MessagesService — chat turn lifecycle', () => {
       expect.objectContaining({ outcome: 'failed', outputChars: 'پاسخ ناتمام'.length }),
     );
   });
+
+  // ---- execution phases + provider fallback (day-7-8 contract §10/§12) ----
+
+  const fallbackModel = { id: 'model-2', name: 'Fallback', provider: 'mock', capabilities: [] };
+  const primaryWithFallback = {
+    id: 'model-1',
+    name: 'Primary',
+    provider: 'mock',
+    capabilities: [],
+    fallbackModelId: 'model-2',
+  };
+
+  it('streams the phase lifecycle: meta → thinking → delta → generating → done', async () => {
+    setup();
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('پاسخ');
+    });
+
+    const { done } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
+    const events = await done;
+
+    const statuses = events.filter(
+      (e: ChatStreamEvent) => e.type === 'status',
+    ) as Extract<ChatStreamEvent, { type: 'status' }>[];
+    expect(statuses.map((s) => s.status)).toEqual(['thinking', 'generating']);
+    // `thinking` precedes the first delta; `generating` precedes the delta it
+    // announces (the text of the turn is appended after the phase flip).
+    const firstDeltaIndex = events.findIndex((e: ChatStreamEvent) => e.type === 'delta');
+    expect(events.findIndex((e: ChatStreamEvent) => e.type === 'status')).toBeLessThan(firstDeltaIndex);
+    const generatingIndex = events.findIndex(
+      (e: ChatStreamEvent) => e.type === 'status' && (e as any).status === 'generating',
+    );
+    expect(generatingIndex).toBeLessThan(firstDeltaIndex);
+  });
+
+  it('carries the server-decided webSearch flag on meta (plain turn: false)', async () => {
+    setup();
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('پاسخ');
+    });
+
+    const { done } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
+    const events = await done;
+    expect(events[0]).toMatchObject({ type: 'meta', webSearch: false });
+  });
+
+  it('streams sources before the first delta on a search turn', async () => {
+    setup();
+    webSearchService.isEnabled.mockReturnValue(true);
+    webSearchService.runForTurn.mockResolvedValue({
+      sources: [{ title: 'T', url: 'https://x.dev/a', domain: 'x.dev', snippet: 's' }],
+      contextBlock: '[نتایج]',
+      warning: null,
+    });
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('پاسخ با منبع');
+    });
+
+    const { done } = await begin('user-1', 'conv-1', 'سوال', undefined, undefined, [], 'free', true);
+    const events = await done;
+
+    const order = events.map((e: ChatStreamEvent) => e.type);
+    expect(order.indexOf('sources')).toBeGreaterThan(order.indexOf('search_completed'));
+    expect(order.indexOf('sources')).toBeLessThan(order.indexOf('delta'));
+    const sourcesEvent = events.find(
+      (e: ChatStreamEvent) => e.type === 'sources',
+    ) as Extract<ChatStreamEvent, { type: 'sources' }>;
+    expect(sourcesEvent.sources).toHaveLength(1);
+    // meta announces the search phase server-side.
+    expect(events[0]).toMatchObject({ type: 'meta', webSearch: true });
+  });
+
+  it('rejects webSearch on a model without the web-search capability (400 pre-flight)', async () => {
+    setup();
+    webSearchService.isEnabled.mockReturnValue(true); // global switch on; capability is the gate under test
+    await expect(
+      service.assertChatTurnAllowed('user-1', 'conv-1', undefined, { content: 'سلام' }, [], false, true),
+    ).rejects.toMatchObject({ status: 400, message: 'این مدل از جستجوی وب پشتیبانی نمی‌کند.' });
+  });
+
+  it('rejects webSearch with 503 while the platform search switch is off (pre-flight)', async () => {
+    setup(); // isEnabled() === false — the global kill-switch wins over everything else
+    await expect(
+      service.assertChatTurnAllowed('user-1', 'conv-1', undefined, { content: 'سلام' }, [], false, true),
+    ).rejects.toMatchObject({ status: 503, message: 'جستجوی وب فعال نیست.' });
+  });
+
+  it('accepts webSearch on a model WITH the web-search capability', async () => {
+    setup();
+    webSearchService.isEnabled.mockReturnValue(true);
+    modelsService.resolveChatModel.mockResolvedValue({
+      id: 'model-1',
+      name: 'Searcher',
+      provider: 'mock',
+      capabilities: ['web-search'],
+    });
+
+    await expect(
+      service.assertChatTurnAllowed('user-1', 'conv-1', undefined, { content: 'سلام' }, [], false, true),
+    ).resolves.toMatchObject({ plan: 'free' });
+  });
+
+  it('returns the plan-scoped access facts from pre-flight for the fallback check', async () => {
+    setup();
+    const snapshot = entitlement({ allowedModelIds: ['model-1'] });
+    entitlementsService.resolveForUser.mockResolvedValue(snapshot);
+
+    const result = await service.assertChatTurnAllowed('user-1', 'conv-1', undefined, {
+      content: 'سلام',
+    });
+    expect(result.access).toEqual({
+      allowedModelIds: ['model-1'],
+      features: snapshot.features,
+    });
+  });
+
+  it('falls back once on a retryable pre-delta failure and answers with the fallback model', async () => {
+    setup();
+    modelsService.resolveChatModel.mockResolvedValue(primaryWithFallback);
+    modelsService.resolveFallbackCandidate.mockResolvedValue(fallbackModel);
+    let call = 0;
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      if (call++ === 0) {
+        throw new ProviderError('unavailable', 503, 'provider 1 down');
+      }
+      yield text('پاسخ از مدل جایگزین');
+    });
+
+    const { done } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
+    const events = await done;
+
+    // The terminal row is attributed to the fallback model.
+    const terminal = events.at(-1) as Extract<ChatStreamEvent, { type: 'done' }>;
+    expect(terminal.type).toBe('done');
+    expect(terminal.assistantMessage).toMatchObject({
+      status: 'completed',
+      modelId: 'model-2',
+      content: 'پاسخ از مدل جایگزین',
+    });
+
+    // The switch is announced exactly once with the fallback detail.
+    const fallbackStatuses = events.filter(
+      (e: ChatStreamEvent) => e.type === 'status' && (e as any).detail === 'fallback',
+    );
+    expect(fallbackStatuses).toHaveLength(1);
+
+    // Exactly two provider attempts, no duplicated text (INV-9).
+    expect(aiProviderService.streamChat).toHaveBeenCalledTimes(2);
+
+    // The persisted assistant row AND the usage row attribute to the model
+    // that actually answered (contract §22.6).
+    const finalRow = messagesRepository.saved
+      .filter((row: any) => row.role === 'assistant')
+      .at(-1);
+    expect(finalRow).toMatchObject({ status: 'completed', modelId: 'model-2' });
+    expect(messagesRepository.update).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ modelId: 'model-2' }),
+    );
+    expect(usageService.recordFallbackModel).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ id: 'model-2' }),
+    );
+  });
+
+  it('never falls back after the first delta (partial output is never discarded)', async () => {
+    setup();
+    modelsService.resolveChatModel.mockResolvedValue(primaryWithFallback);
+    modelsService.resolveFallbackCandidate.mockResolvedValue(fallbackModel);
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('نیمه‌تمام ');
+      throw new ProviderError('timeout', null, 'died mid-stream');
+    });
+
+    const { done } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
+    const events = await done;
+
+    expect(aiProviderService.streamChat).toHaveBeenCalledTimes(1);
+    expect(modelsService.resolveFallbackCandidate).not.toHaveBeenCalled();
+    const terminal = events.at(-1) as Extract<ChatStreamEvent, { type: 'failed' }>;
+    expect(terminal.type).toBe('failed');
+    // Partial content is preserved honestly.
+    expect(terminal.assistantMessage).toMatchObject({ status: 'failed', content: 'نیمه‌تمام ' });
+  });
+
+  it('never falls back on non-retryable failures (auth/invalid-config fail fast)', async () => {
+    setup();
+    modelsService.resolveChatModel.mockResolvedValue(primaryWithFallback);
+    modelsService.resolveFallbackCandidate.mockResolvedValue(fallbackModel);
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      throw new ProviderError('auth', 401, 'bad api key');
+    });
+
+    const { done } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
+    const events = await done;
+
+    expect(aiProviderService.streamChat).toHaveBeenCalledTimes(1);
+    expect(modelsService.resolveFallbackCandidate).not.toHaveBeenCalled();
+    expect(events.at(-1)?.type).toBe('failed');
+  });
+
+  it('fails the turn when the fallback candidate cannot serve the caller', async () => {
+    setup();
+    modelsService.resolveChatModel.mockResolvedValue(primaryWithFallback);
+    modelsService.resolveFallbackCandidate.mockResolvedValue(null); // inactive/not allowed
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      throw new ProviderError('rate-limit', 429, 'slow down');
+    });
+
+    const { done } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
+    const events = await done;
+
+    expect(aiProviderService.streamChat).toHaveBeenCalledTimes(1);
+    expect(usageService.recordFallbackModel).not.toHaveBeenCalled();
+    const terminal = events.at(-1) as Extract<ChatStreamEvent, { type: 'failed' }>;
+    expect(terminal.type).toBe('failed');
+    expect(terminal.clientMessage).toContain('موقتاً در دسترس نیست');
+  });
+
+  it('can never loop A→B→A: the fallback of the fallback is refused', async () => {
+    setup();
+    modelsService.resolveChatModel.mockResolvedValue(primaryWithFallback);
+    // B answers for a while... then B ALSO fails retryably; B's fallback is A
+    // (the model already attempted) — the attempted-set must block the hop.
+    modelsService.resolveFallbackCandidate
+      .mockResolvedValueOnce({ ...fallbackModel, fallbackModelId: 'model-1' })
+      .mockResolvedValueOnce({ ...primaryWithFallback });
+    let call = 0;
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      if (call++ < 2) {
+        throw new ProviderError('unavailable', 503, `provider ${call} down`);
+      }
+      yield text('نباید برسد');
+    });
+
+    const { done } = await begin('user-1', 'conv-1', 'سلام', undefined, undefined);
+    const events = await done;
+
+    expect(aiProviderService.streamChat).toHaveBeenCalledTimes(2);
+    const terminal = events.at(-1) as Extract<ChatStreamEvent, { type: 'failed' }>;
+    expect(terminal.type).toBe('failed');
+    expect(terminal.assistantMessage).toMatchObject({ status: 'failed', content: '' });
+  });
 });
 
 describe('MessagesService — reconnect / recovery', () => {
@@ -928,7 +1193,11 @@ describe('MessagesService — reconnect / recovery', () => {
   let webSearchService: { isEnabled: jest.Mock; runForTurn: jest.Mock };
   let entitlementsService: { resolveForUser: jest.Mock };
   let quotaService: { assertQuota: jest.Mock };
-  let usageService: { recordTurnStart: jest.Mock; recordTurnEnd: jest.Mock };
+  let usageService: {
+    recordTurnStart: jest.Mock;
+    recordTurnEnd: jest.Mock;
+    recordFallbackModel: jest.Mock;
+  };
 
   const setup = ({ history = [] }: { history?: any[] } = {}) => {
     conversationsService = {
@@ -941,6 +1210,9 @@ describe('MessagesService — reconnect / recovery', () => {
     };
     modelsService = {
       resolveChatModel: jest.fn().mockResolvedValue({ id: 'model-1', name: 'Mock', provider: 'mock', capabilities: [] }),
+      // Only consulted when a model actually declares a fallback AND the
+      // provider failed with a retryable kind before the first delta.
+      resolveFallbackCandidate: jest.fn().mockResolvedValue(null),
     };
     messagesRepository = createMockRepository();
     filesService = { getReadyContext: jest.fn().mockResolvedValue([]) };
@@ -954,7 +1226,11 @@ describe('MessagesService — reconnect / recovery', () => {
     // Entitlement/quota/usage collaborators default to the permissive path.
     entitlementsService = { resolveForUser: jest.fn().mockResolvedValue(entitlement()) };
     quotaService = { assertQuota: jest.fn().mockResolvedValue(undefined) };
-    usageService = { recordTurnStart: jest.fn().mockResolvedValue(undefined), recordTurnEnd: jest.fn().mockResolvedValue(undefined) };
+    usageService = {
+      recordTurnStart: jest.fn().mockResolvedValue(undefined),
+      recordTurnEnd: jest.fn().mockResolvedValue(undefined),
+      recordFallbackModel: jest.fn().mockResolvedValue(undefined),
+    };
     registry = new GenerationRegistry();
     service = new MessagesService(
       messagesRepository as any,

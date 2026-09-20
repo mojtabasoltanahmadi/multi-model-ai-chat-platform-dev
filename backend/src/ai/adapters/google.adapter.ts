@@ -113,6 +113,12 @@ export class GoogleAdapter implements ProviderAdapter {
         const parts = parsed?.candidates?.[0]?.content?.parts;
         if (Array.isArray(parts)) {
           for (const part of parts) {
+            // `thought: true` parts are Gemini's internal reasoning channel —
+            // signal the phase, forward nothing (INV-12, day-7-8 §10).
+            if (part?.thought === true) {
+              yield { type: 'status', status: 'thinking' };
+              continue;
+            }
             if (typeof part?.text === 'string' && part.text) {
               yield { type: 'text', text: part.text };
             }

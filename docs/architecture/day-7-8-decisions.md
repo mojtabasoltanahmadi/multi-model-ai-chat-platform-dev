@@ -48,6 +48,32 @@
 >    price (a realistic figure) overflows on insert. Caught by the Stage 19
 >    E2E quota test.
 
+> **Implementation status (2026-09-20, Stage 20 — completion audit):** the
+> remaining §7–§12 gaps are closed on `develop`. Landed in this stage:
+> **§12 fallback** — `ai_models.fallback_model_id` (self-FK, SET NULL) with the
+> admin-boundary rules (exists / active / not-self / at-least-as-accessible),
+> runtime single-hop on retryable kinds (`timeout` / `rate-limit` /
+> `unavailable`) strictly **pre-first-delta**, attempted-model tracking (no
+> A→B→A), accessibility re-check against plan + allowlist + thinking feature,
+> and usage-row re-attribution (`UsageService.recordFallbackModel`) so tokens
+> and cost follow the model that actually answered. **§10/§11 execution
+> phases** — the orchestrator narrates `status {thinking}` before the provider
+> call and `status {generating}` at the first delta; adapters signal
+> `thinking` on provider reasoning channels (Anthropic `content_block_start`
+> thinking, OpenAI-compatible `reasoning_content`, Gemini `thought` parts) as
+> a label only — reasoning content is still stripped (INV-12). **§11 `sources`
+> event** — citations stream once before the first delta (and to reconnecting
+> subscribers); they also ride the terminal row as before. **§8/§16
+> capability + availability** — `webSearch: true` on a model without
+> `web-search` → pre-flight 400; search requested while `WEB_SEARCH_ENABLED`
+> is off → pre-flight 503 (previously silently ignored); `GET /models` now
+> resolves the caller's tier from entitlements instead of a hard-coded
+> `free`. **Naming amendment (agreed):** the search lifecycle uses the
+> existing `search_started` / `search_completed` events instead of
+> `status: searching` — wired end-to-end since Stage 18 and documented in
+> API.md; this file records the deviation instead of renaming shipped
+> events. E2E: `scripts/fallback-resilience-test.mjs` (33 checks).
+
 ---
 
 ## 1. Purpose

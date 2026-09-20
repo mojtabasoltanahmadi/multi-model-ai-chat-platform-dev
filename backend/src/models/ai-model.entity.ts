@@ -2,6 +2,9 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
+  JoinColumn,
+  ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
 import { ModelCapability } from './model-capabilities';
@@ -60,6 +63,22 @@ export class AiModel {
 
   @Column({ name: 'is_default', type: 'boolean', default: false })
   isDefault: boolean;
+
+  /**
+   * Optional single-hop fallback model (day-7-8 contract §12), admin-set.
+   * When the provider of THIS model fails with a retryable kind BEFORE the
+   * first streamed token, the turn restarts once on this model. Rules
+   * enforced at the admin boundary: must exist, be active, not self, and be
+   * at least as accessible as the primary (a free user must never fall back
+   * into a 403). Null ⇒ no fallback.
+   */
+  @Index()
+  @Column({ name: 'fallback_model_id', type: 'uuid', nullable: true })
+  fallbackModelId: string | null;
+
+  @ManyToOne(() => AiModel, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'fallback_model_id' })
+  fallbackModel: AiModel | null;
 
   /**
    * Declared capabilities from the closed set `MODEL_CAPABILITIES`

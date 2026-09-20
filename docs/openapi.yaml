@@ -254,12 +254,22 @@ paths:
         4. conversation exists **and** belongs to caller → `404 RESOURCE_NOT_FOUND`
         5. model resolution: unknown id → `404`; inactive id → `400 MODEL_INACTIVE`;
            no default configured → `400 NO_DEFAULT_MODEL`
+        6. plan allowlist / feature entitlements → `403`
+        7. `webSearch: true` with the search switch off → `503 SEARCH_DISABLED`
+        8. `webSearch: true` on a model without the `web-search` capability →
+           `400 CAPABILITY_UNSUPPORTED` (model-state: admins are NOT exempt)
+        9. idempotency replay detection (replays skip the quota check)
+        10. daily quota exhausted → `429 QUOTA_EXCEEDED`
 
         Then the stream opens (see the Streaming section in the API info):
-        `meta` → `delta`* → `done` | `failed`. Exactly one assistant message is
-        persisted per turn in every outcome (INV-5). The provider request is
+        `meta` → (`search_started` → `search_completed` → `sources`)? →
+        `status`* → `delta`* → `done` | `failed`. Exactly one assistant message
+        is persisted per turn in every outcome (INV-5). The provider request is
         aborted after the configured timeout (A-8, default 60s) and surfaces as
-        the generic `failed` terminal event.
+        the generic `failed` terminal event — unless the model carries a
+        single-hop fallback and the failure was retryable BEFORE the first
+        token, in which case the turn restarts once on the fallback model
+        (announced via `status {generating, detail: "fallback"}`).
 
         The generation runs DETACHED from this HTTP response: a client
         disconnect (refresh, closed tab, network loss) only unsubscribes — the
@@ -288,8 +298,11 @@ paths:
         '200':
           description: |
             SSE stream (`text/event-stream`). Event payloads use the
-            `StreamMetaEvent`, `StreamDeltaEvent`, `StreamDoneEvent`, and
-            `StreamFailedEvent` schemas documented in components.
+            `StreamMetaEvent`, `StreamStatusEvent`, `StreamSourcesEvent`,
+            `StreamDeltaEvent`, `StreamDoneEvent`, and `StreamFailedEvent`
+            schemas documented in components. Web-search turns additionally
+            carry `search_started` / `search_completed` events before the
+            first delta.
 
             Disconnect handling: disconnect ≠ failure. The generation is
             detached from the HTTP connection, so a mid-stream disconnect only
@@ -316,15 +329,36 @@ paths:
                 event: done
                 data: {"assistantMessage":{"id":"17d53156-1e46-4c61-b444-3ba9506b2d0b","conversationId":"3f7a9529-fcc2-4d6d-9723-ac6d69f928af","role":"assistant","content":"سلام! این یک پاسخ آزمایشی است.","status":"completed","errorMessage":null,"modelId":"84bc6ca9-b6c2-485f-828f-a48c32524759","clientMessageId":null,"createdAt":"2026-09-14T13:38:03.352Z"}}
         '400':
-          description: 'Validation failure, inactive model, or no default model. Codes: `VALIDATION_ERROR`, `MODEL_INACTIVE`, `NO_DEFAULT_MODEL`.'
+          description: 'Validation failure, inactive model, no default model, capability unsupported by the model, or idempotency content collision. Codes: `VALIDATION_ERROR`, `MODEL_INACTIVE`, `NO_DEFAULT_MODEL`, `CAPABILITY_UNSUPPORTED`.'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Model not allowed for the caller's plan / entitlements.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '404':
           description: Unknown/foreign conversation or unknown model id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: |
+            Daily message or token quota exhausted (admins and idempotent
+            replays are exempt). Persian body:
+            «سهمیه پیام‌های امروز شما تمام شده است.»
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: '`webSearch: true` while the platform search switch (`WEB_SEARCH_ENABLED`) is off. Persian body: «جستجوی وب فعال نیست.»'
           content:
             application/json:
               schema:
@@ -1435,9 +1469,51 @@ components:
             Idempotency token set by the client on the original POST. Present on
             user messages; used by the backend to recognize replays and to
             reject content collisions with HTTP 400.
+        attachedFileIds:
+          type: array
+          nullable: true
+          items:
+            type: string
+            format: uuid
+          description: |
+            READY files this USER turn attached as AI context (ids only) —
+            the client renders attachment chips from these. `null` on
+            assistant rows and turns without attachments.
+        sources:
+          type: array
+          nullable: true
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/MessageSource'
+          description: |
+            Web-search citations of THIS assistant turn (`null` on user rows
+            and turns answered without search). Persisted on the row, so
+            history reloads render citations without re-searching; also
+            streamed live via the `sources` SSE event before the first delta.
         createdAt:
           type: string
           format: date-time
+
+    MessageSource:
+      type: object
+      required: [title, url, domain, snippet]
+      description: |
+        One normalized search hit — safe to persist and to send to the
+        client. Only `http:`/`https:` URLs are ever kept; duplicate URLs
+        collapse deterministically at normalization time.
+      properties:
+        title:
+          type: string
+          maxLength: 200
+        url:
+          type: string
+          description: Absolute http/https URL (validated server-side).
+        domain:
+          type: string
+          description: Host without scheme/path (derived server-side, never trusted input).
+        snippet:
+          type: string
+          maxLength: 500
 
     SendMessageRequest:
       type: object
@@ -1469,6 +1545,17 @@ components:
                 assistant row, `meta.replay = true`).
               * Match + mismatched content → 400 in pre-flight
                 (`این پیام قبلاً با متن دیگری ارسال شده است.`).
+        webSearch:
+          type: boolean
+          default: false
+          description: |
+            Opt-in live web search for THIS turn. Pre-flight rejects the
+            request with 503 when the platform search switch
+            (`WEB_SEARCH_ENABLED`) is off, and with 400 when the resolved
+            model's `capabilities` lack `web-search`. On success the turn
+            streams `search_started` → `search_completed` → `sources` before
+            the first `delta`; a failed search degrades to a normal turn
+            (safe warning, never a failed turn).
 
     # ---- Models ----
     AiModel:
@@ -1503,6 +1590,20 @@ components:
             Declared capabilities from the closed set, validated at the admin
             boundary. Capabilities only unlock opt-in features; they never
             gate the base turn.
+        fallbackModelId:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Optional single-hop fallback model (admin endpoints only; the
+            user list carries `hasFallback`). Used once when this model's
+            provider fails with a retryable kind (timeout / rate-limit /
+            unavailable) before the first streamed token. Admin-boundary
+            rules: must exist, be active, not be self, and be at least as
+            accessible as this model.
+        hasFallback:
+          type: boolean
+          description: True when a single-hop fallback model is configured.
         isActive:
           type: boolean
         isFree:
@@ -1557,6 +1658,13 @@ components:
         outputPricePerMillion:
           type: string
           description: Toman per 1M output tokens; empty/0 ⇒ not priced (cost null). Admin-only in responses.
+        fallbackModelId:
+          type: string
+          format: uuid
+          description: |
+            Optional single-hop fallback model. Validated server-side: must
+            exist, be active, not be self, and be at least as accessible as
+            this model (400 otherwise).
         isActive:
           type: boolean
           default: true
@@ -1604,6 +1712,14 @@ components:
         outputPricePerMillion:
           type: string
           nullable: true
+        fallbackModelId:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Single-hop fallback model; send `null` to clear. Invalid values
+            (unknown / inactive / self / less accessible than this model)
+            are refused with 400.
         isActive:
           type: boolean
         isFree:
@@ -1648,6 +1764,53 @@ components:
             `true` when the request was treated as a retry (the supplied
             `clientMessageId` matched an existing user row with the same
             content). `false` on the first send for a given id.
+        webSearch:
+          type: boolean
+          description: |
+            The SERVER's decision on whether the web-search phase is active
+            for this turn (capability + plan + global switch). A client
+            `webSearch: true` alone is never proof a search will run.
+
+    StreamStatusEvent:
+      type: object
+      required: [status]
+      description: |
+        Execution-phase narration — safe labels about the system's own work,
+        never model output and never chain-of-thought (provider reasoning
+        channels are stripped inside the adapters). Ephemeral: not persisted,
+        not replayed on reconnect. Appears only before the first `delta`
+        (`generating` coincides with it). Additive: clients that do not know
+        this event ignore it.
+      properties:
+        status:
+          type: string
+          enum: [thinking, generating]
+          description: |
+            `thinking` — provider warming up / reasoning before the first
+            token. `generating` — first delta arrived (uniform signal).
+        detail:
+          type: string
+          enum: [fallback]
+          description: |
+            `fallback` — the single-hop provider switch fired; the answer
+            will come from the fallback model (the terminal row carries its
+            real `modelId`).
+
+    StreamSourcesEvent:
+      type: object
+      required: [sources]
+      description: |
+        Web-search citations of THIS turn, streamed once right after they
+        were persisted — before the first `delta` — and forwarded to
+        reconnecting subscribers. Duplicate URLs collapse deterministically;
+        only http/https URLs are kept. Clients that miss the event lose
+        nothing: the terminal row echoes `sources`.
+      properties:
+        sources:
+          type: array
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/MessageSource'
 
     StreamDeltaEvent:
       type: object

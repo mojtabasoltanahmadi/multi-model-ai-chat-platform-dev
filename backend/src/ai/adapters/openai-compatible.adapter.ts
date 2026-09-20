@@ -84,7 +84,17 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
         if (data === '[DONE]') return;
         try {
           const parsed = JSON.parse(data);
-          const delta: string | undefined = parsed?.choices?.[0]?.delta?.content;
+          const choice = parsed?.choices?.[0];
+          // A reasoning channel (e.g. DeepSeek-style `reasoning_content`)
+          // signals the thinking phase — as a STATUS only; its content is
+          // never forwarded (INV-12, day-7-8 §10).
+          if (
+            typeof choice?.delta?.reasoning_content === 'string' &&
+            choice.delta.reasoning_content
+          ) {
+            yield { type: 'status', status: 'thinking' };
+          }
+          const delta: string | undefined = choice?.delta?.content;
           if (delta) yield { type: 'text', text: delta };
           const usage = parsed?.usage;
           if (usage) {

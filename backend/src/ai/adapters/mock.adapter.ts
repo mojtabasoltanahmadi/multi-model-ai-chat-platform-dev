@@ -17,6 +17,9 @@ const MOCK_RESPONSE = [
 export class MockAdapter implements ProviderAdapter {
   async *streamChat(): AsyncGenerator<ProviderEvent> {
     // Small delay between chunks so streaming is visible in the UI.
+    // NOTE: the mock deliberately emits no `status` events — the orchestrator
+    // narrates the thinking/generating phases itself, so the E2E lifecycle
+    // stays deterministic.
     const chunks = MOCK_RESPONSE.match(/\S+\s*/g) ?? [MOCK_RESPONSE];
     for (const chunk of chunks) {
       await sleep(40);

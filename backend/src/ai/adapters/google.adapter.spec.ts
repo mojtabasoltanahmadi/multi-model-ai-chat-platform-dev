@@ -55,6 +55,23 @@ describe('GoogleAdapter', () => {
     ]);
   });
 
+  it('signals thinking on `thought` parts but never forwards their content (INV-12)', async () => {
+    fetchMock.mockResolvedValue(
+      sseResponse([
+        'data: {"candidates":[{"content":{"parts":[{"text":"استدلال خصوصی","thought":true}]}}]}\n\n',
+        'data: {"candidates":[{"content":{"parts":[{"text":"پاسخ"}]}}]}\n\n',
+      ]),
+    );
+
+    const events = await collect(adapter.streamChat(history, model(), new AbortController().signal));
+
+    expect(events).toEqual([
+      { type: 'status', status: 'thinking' },
+      { type: 'text', text: 'پاسخ' },
+    ]);
+    expect(JSON.stringify(events)).not.toContain('استدلال خصوصی');
+  });
+
   it('maps assistant history to the model role and drops LEADING model turns', async () => {
     fetchMock.mockResolvedValue(sseResponse([]));
 

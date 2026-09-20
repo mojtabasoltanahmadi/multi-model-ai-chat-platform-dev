@@ -5,6 +5,7 @@ import {
   IsIn,
   IsOptional,
   IsString,
+  IsUUID,
   MaxLength,
 } from 'class-validator';
 import { AI_PROVIDER_KINDS } from './create-model.dto';
@@ -53,6 +54,15 @@ export class UpdateModelDto {
   @IsOptional()
   @IsBoolean()
   isFree?: boolean;
+
+  /**
+   * Optional single-hop fallback model; an explicit `null` clears it.
+   * Validated in the service (must exist, be active, not self, at least as
+   * accessible as this model).
+   */
+  @IsOptional()
+  @IsUUID('4', { message: 'شناسه مدل جایگزین نامعتبر است.' })
+  fallbackModelId?: string | null;
 
   @IsOptional()
   @IsString()

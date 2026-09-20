@@ -56,6 +56,8 @@ flushed. The frontend never sees an orphan SSE response carrying a JSON error.
 | Unknown model id | 404 | `{ message }` |
 | Inactive model | 400 | `{ message }` |
 | Model not allowed for caller's plan | 403 | `{ message }` |
+| `webSearch: true` while the platform search switch (`WEB_SEARCH_ENABLED`) is off | 503 | `{ message: "جستجوی وب فعال نیست." }` |
+| `webSearch: true` on a model whose `capabilities` lack `web-search` | 400 | `{ message: "این مدل از جستجوی وب پشتیبانی نمی‌کند." }` — a model-state check; admins are NOT exempt |
 | `clientMessageId` matches an existing user row whose `content` differs | 400 | `{ message: "این پیام قبلاً با متن دیگری ارسال شده است." }` |
 
 ### Success — 200 `text/event-stream`
@@ -69,8 +71,15 @@ data: {
   "userMessage":      { id, role: "user", content, status: null, ... },
   "assistantMessage": { id, role: "assistant", content: "", status: "pending", ... },
   "model":            { id, name, provider },
-  "replay":           false
+  "replay":           false,
+  "webSearch":        false
 }
+
+event: status              // execution-phase narration (backend truth, never fabricated)
+data: { "status": "thinking" }
+
+event: status
+data: { "status": "generating" }
 
 event: delta
 data: { "text": "chunk" }     // repeated as the provider streams
@@ -80,18 +89,39 @@ data: { "assistantMessage": { status: "completed", content, ... } }
 ```
 
 `meta` carries the real `assistantMessage.id` so the client can swap its placeholder for
-the persisted row immediately (no race between optimistic UI and DB state).
+the persisted row immediately (no race between optimistic UI and DB state). `meta.webSearch`
+records the SERVER's decision on whether the web-search phase is active for this turn
+(capability + plan + global switch) — the client flag alone is never proof.
+
+### Execution phases (`status` events)
+
+The backend narrates its own work with a **closed set** of safe status labels — these are
+phase labels about the system's execution, never model output and never chain-of-thought
+(provider reasoning channels are stripped inside the adapters; only the label leaves the
+backend):
+
+| `status` | Meaning | Emitted when |
+|---|---|---|
+| `thinking` | provider warming up / reasoning | once before the provider call (after the search phase on searched turns); adapters may also signal it when a reasoning block opens |
+| `generating` | text is streaming | at the first delta |
+| `generating` + `detail: "fallback"` | single-hop provider switch | right after the fallback model took over (see [Fallback](#fallback--graceful-degradation)) |
+
+Rules: statuses appear only **before** the first `delta` (the `generating` label coincides
+with it); they are ephemeral — not persisted, not replayed on reconnect. Clients that do
+not know `status` simply ignore it (additive event).
 
 ### Web search
 
 Opt-in per turn via `webSearch: true`. Lifecycle on a searched turn:
 
 ```
-event: meta
+event: meta                     // meta.webSearch = true
 event: search_started
 data: {}
 event: search_completed
 data: { "resultCount": 5, "warning": null }
+event: sources                  // citations streamed BEFORE the first delta
+data: { "sources": [ { "title": "...", "url": "...", "domain": "...", "snippet": "..." } ] }
 event: delta            // answer streams as usual
 ...
 event: done
@@ -100,20 +130,35 @@ data: { "assistantMessage": { status: "completed", sources: [...], ... } }
 
 - The search runs inside the detached generation loop, before the AI call: the client
   shows «در حال جستجو در وب…», then «N منبع پیدا شد», then the answer streams.
+- `sources` streams the exact hits that were injected into the prompt, scoped to THIS
+  turn (each source belongs to the generation that searched for it — never a previous
+  turn's). Duplicate URLs collapse deterministically; only `http:`/`https:` URLs are
+  kept. Clients that miss the event lose nothing: the terminal row echoes `sources`.
 - `warning` (non-null) means the search degraded — the answer below was produced
   **without** web context (timeout, rate limit, network, empty results, missing key).
   The turn still completes; the client surfaces the warning once.
 - Sources are persisted on the assistant row (`messages.sources`, jsonb) and echoed in
-  `done`/`failed` payloads, so history reloads render citations without re-searching.
-  Search runs only for new turns with `webSearch: true` — never on history load.
-- Backend enforcement: the global `WEB_SEARCH_ENABLED` kill-switch gates the provider
-  call (a client flag alone is never sufficient); all chat endpoints already require
+  `done`/`failed` payloads and in the reconnect `snapshot`, so history reloads render
+  citations without re-searching. Search runs only for new turns with `webSearch: true`
+  — never on history load.
+- Backend enforcement: the global `WEB_SEARCH_ENABLED` kill-switch turns a search
+  request into a pre-stream `503` (clean JSON, no SSE); a model without the
+  `web-search` capability gets a pre-stream `400` (see Pre-flight). All chat endpoints
+  already require
   authentication. Only `http:`/`https:` URLs are persisted or linked.
 - Environment: `WEB_SEARCH_ENABLED`, `WEB_SEARCH_PROVIDER=serper`, `SERPER_API_KEY`
   (secret — `.env` only, never committed), `WEB_SEARCH_MAX_RESULTS` (default 5),
   `WEB_SEARCH_TIMEOUT_MS` (default 5000), `WEB_SEARCH_MAX_QUERY_LENGTH` (default 500),
   `WEB_SEARCH_MAX_CONTEXT_CHARS` (default 6000). Without a key the turn degrades with
-  a safe warning; nothing throws and no secret is ever logged or returned.
+  a safe warning; nothing throws and no secret is ever logged or returned. At boot the
+  provider logs only a MASKED fingerprint (`SERPER KEY LOADED: 0293a***** (len=40)` /
+  `SERPER KEY MISSING`), and the key value is normalized (surrounding whitespace and
+  one pair of quotes stripped) so a hand-edited `.env` can never corrupt the
+  `X-API-KEY` header.
+- 403 semantics: a Serper auth failure is a **JSON** error body (bad/expired key).
+  A 403 with an **HTML** page comes from the Google front edge — the request was
+  blocked by client IP **before** Serper evaluated the key (the warn log says so
+  explicitly); a new key cannot fix that, the server's egress route must.
 
 ```ts
 interface MessageSource { title: string; url: string; domain: string; snippet: string; }
@@ -136,6 +181,38 @@ generic message:
 event: failed
 data: { "assistantMessage": { status: "failed", ... }, "message": "سرویس هوش مصنوعی موقتاً در دسترس نیست. لطفاً دوباره تلاش کنید." }
 ```
+
+### Fallback / graceful degradation
+
+Each model may carry ONE admin-configured fallback (`ai_models.fallbackModelId`). When
+its provider fails with a **retryable** normalized failure (`timeout`, `rate-limit`,
+`unavailable`) **before the first streamed token**, the turn restarts once on the
+fallback model:
+
+```
+event: status  data: { "status": "thinking" }
+// primary fails (connection refused / timeout / 429 / 5xx)
+event: status  data: { "status": "generating", "detail": "fallback" }
+event: status  data: { "status": "generating" }
+event: delta   ...             // fallback model's answer
+event: done    data: { "assistantMessage": { modelId: "<fallback id>", ... } }
+```
+
+Invariants (enforced server-side):
+
+- **Pre-first-delta only.** A provider dying after deltas never falls back — partial
+  content is never discarded or spliced (the turn fails honestly instead).
+- **One hop, bounded.** `A → B → A` loops are impossible (attempted models are tracked);
+  the fallback of the fallback is never followed. All-providers-fail ends in the normal
+  `failed` terminal with the safe Persian message.
+- **Eligible kinds only.** `auth` (bad key), `invalid-request`, `invalid-config`,
+  `unknown` fail the turn immediately — retrying those on another model is pointless.
+- **Accessibility re-checked.** The fallback must be active, allowed for the caller's
+  plan (`isFree`, plan model allowlist, thinking feature), else the turn fails with the
+  ORIGINAL provider error — a free user never falls back into a 403.
+- **Truthful bookkeeping.** The assistant row and the usage record are re-attributed to
+  the model that actually answered (tokens/cost included); `meta.model` still shows the
+  requested model, the terminal `done` row shows who answered.
 
 Client disconnect (browser tab closed, network dropped, refresh). **No error event is
 emitted and the generation is NOT stopped** — disconnect ≠ failure. The HTTP connection
@@ -160,9 +237,13 @@ Events, in order:
 
 ```
 event: snapshot
-data: { "assistantMessage": { content: "<full content so far>", status, ... } }
+data: { "assistantMessage": { content: "<full content so far>", status, sources, ... } }
 
-// live generation only:
+// live generation only — events that fire AFTER the client attached:
+event: status
+data: { "status": "thinking" | "generating", "detail"?: "fallback" }
+event: sources
+data: { "sources": [ ... ] }   // a client attaching mid-search still gets the citations
 event: delta
 data: { "text": "chunk" }      // the remaining deltas, never overlapping the snapshot
 
@@ -172,6 +253,9 @@ event: done
 event: failed
   → { "assistantMessage": { status: "failed" | "interrupted", ... }, "message": "<generic>" }
 ```
+
+Statuses are live narration only — phases that already passed are never replayed; the
+snapshot's row state (plus the terminal event) is the recovery truth.
 
 Recovery behavior by row state:
 
@@ -243,7 +327,7 @@ Upload limits and lifecycle: [FILES.md](FILES.md).
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/models` | models the **caller's plan** may use — currently **active AND free** (the plan-filtered list for the chat picker; never the full catalog) |
+| GET | `/models` | models the **caller's plan** may use — the tier is resolved FRESH from the caller's entitlements (free callers see active **AND free** models; premium callers see every active model). Display filtering only; `resolveChatModel` re-checks on every send. Every row carries `capabilities` and `hasFallback` (never the fallback row itself) |
 
 ## Admin models (`role=admin` only)
 
@@ -254,11 +338,18 @@ streaming `/chat/completions`) · `anthropic` (Claude Messages API) ·
 `capabilities` — a closed set (`web-search`, `reasoning`) validated at this
 boundary and surfaced in every model response (picker glyphs, admin panel).
 
+**`fallbackModelId`** — optional single-hop fallback model (see
+[Fallback](#fallback--graceful-degradation)). Admin-boundary rules (all `400` on
+violation): the fallback must exist, be active, not be the model itself, and be at
+least as accessible as the primary (a free model may never fall back into a
+premium model). An explicit `null` on PATCH clears it. Responses expose it as the id
+(admin endpoints) plus a `hasFallback` flag everywhere.
+
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/admin/models` | all models; `apiKey` never returned, `hasApiKey` instead |
-| POST | `/admin/models` | `{ name, provider: 'mock'\|'openai-compatible'\|'anthropic'\|'google', externalModelId, baseUrl?, apiKey?, capabilities?, inputPricePerMillion?, outputPricePerMillion?, isActive?, isFree? }`; the first active+free model auto-becomes default |
-| PATCH | `/admin/models/:modelId` | partial update (incl. `isFree`, `capabilities`, pricing); deactivating the default is refused (400); removing free access from the default is refused (400) |
+| POST | `/admin/models` | `{ name, provider: 'mock'\|'openai-compatible'\|'anthropic'\|'google', externalModelId, baseUrl?, apiKey?, capabilities?, inputPricePerMillion?, outputPricePerMillion?, fallbackModelId?, isActive?, isFree? }`; the first active+free model auto-becomes default |
+| PATCH | `/admin/models/:modelId` | partial update (incl. `isFree`, `capabilities`, pricing, `fallbackModelId?` — explicit `null` clears); deactivating the default is refused (400); removing free access from the default is refused (400); invalid fallback (unknown/inactive/self/less accessible) refused (400) |
 | POST | `/admin/models/:modelId/default` | transactional swap; exactly one default; inactive or non-free models refused (400) |
 | DELETE | `/admin/models/:modelId` | default model deletion refused (400) |
 

@@ -109,6 +109,7 @@ describe('AiProviderService — strategy selection', () => {
 
     const events = await collect(service.streamChat(history, model('mock')));
     expect(events.length).toBeGreaterThan(0);
+    // The mock is pure text: the orchestrator narrates the phases itself.
     expect(events.every((event) => event.type === 'text')).toBe(true);
     // The canned Persian response proves the real mock adapter is exercised.
     expect(events.map((event) => (event as { text: string }).text).join('')).toContain('ماک');

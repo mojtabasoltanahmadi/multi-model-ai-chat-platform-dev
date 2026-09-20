@@ -74,6 +74,27 @@ describe('AnthropicAdapter', () => {
     expect(serialized).not.toContain('thinking');
   });
 
+  it('signals the thinking PHASE when an extended-thinking block opens, content still stripped (INV-12)', async () => {
+    fetchMock.mockResolvedValue(
+      sseResponse([
+        'data: {"type":"content_block_start","content_block":{"type":"thinking","thinking":""}}\n\n',
+        'data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"private reasoning"}}\n\n',
+        'data: {"type":"content_block_stop","index":0}\n\n',
+        'data: {"type":"content_block_start","content_block":{"type":"text","text":""}}\n\n',
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"پاسخ"}}\n\n',
+      ]),
+    );
+
+    const events = await collect(adapter.streamChat(history, model(), new AbortController().signal));
+
+    expect(events).toEqual([
+      { type: 'status', status: 'thinking' },
+      { type: 'text', text: 'پاسخ' },
+    ]);
+    // The status label is a phase name, not reasoning content.
+    expect(JSON.stringify(events)).not.toContain('private reasoning');
+  });
+
   it('maps mid-stream error events onto the closed kind set', async () => {
     fetchMock.mockResolvedValue(
       sseResponse([

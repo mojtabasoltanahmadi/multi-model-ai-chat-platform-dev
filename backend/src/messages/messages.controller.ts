@@ -31,9 +31,12 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
  *   Orphaned generations (server restart) are honestly marked 'interrupted'.
  *
  * Event grammar (both endpoints):
- *   meta      → send only: { userMessage, assistantMessage(pending), model, replay }
+ *   meta      → send only: { userMessage, assistantMessage(pending), model, replay, webSearch }
+ *   status    → { status: 'thinking'|'generating', detail?: 'fallback' } — execution
+ *               phases only, before/at the first delta; never chain-of-thought
  *   search_started   → send only, web-search turns: {}
  *   search_completed → send only, web-search turns: { resultCount, warning }
+ *   sources   → web-search turns: { sources: [...] } once, before the first delta
  *   snapshot  → reconnect only: { assistantMessage } — full content so far
  *   delta     → { text } (append)
  *   done      → { assistantMessage } (terminal success)
@@ -66,10 +69,11 @@ export class MessagesController {
     // Validate ownership, model availability + plan access, idempotency,
     // attached-file readiness and the caller's daily quota BEFORE opening the
     // SSE stream, so these errors reach the client as normal JSON errors
-    // (429/403/400). Attachments are resolved here and reused for this turn's
-    // prompt (files are read exactly once); the plan is read once and passed
-    // to beginChatTurn so both halves of the turn see the same plan.
-    const { attachments, plan } = await this.messagesService.assertChatTurnAllowed(
+    // (429/403/400/503). Attachments are resolved here and reused for this
+    // turn's prompt (files are read exactly once); the plan and the plan-
+    // scoped access facts are read once and passed to beginChatTurn so both
+    // halves of the turn (and the fallback model check) see the same state.
+    const { attachments, plan, access } = await this.messagesService.assertChatTurnAllowed(
       user.id,
       conversationId,
       dto.modelId,
@@ -99,6 +103,7 @@ export class MessagesController {
       attachments,
       plan,
       dto.webSearch ?? false,
+      access,
     );
 
     // Disconnect signal: 'close' fires on both premature disconnects and our
@@ -116,9 +121,15 @@ export class MessagesController {
             assistantMessage: this.serializeMessage(event.assistantMessage),
             model: { id: event.model.id, name: event.model.name, provider: event.model.provider },
             replay: event.replay,
+            webSearch: event.webSearch,
           });
         } else if (event.type === 'delta') {
           this.writeEvent(response, 'delta', { text: event.text });
+        } else if (event.type === 'status') {
+          this.writeEvent(response, 'status', {
+            status: event.status,
+            ...(event.detail ? { detail: event.detail } : {}),
+          });
         } else if (event.type === 'search_started') {
           this.writeEvent(response, 'search_started', {});
         } else if (event.type === 'search_completed') {
@@ -126,6 +137,8 @@ export class MessagesController {
             resultCount: event.resultCount,
             warning: event.warning,
           });
+        } else if (event.type === 'sources') {
+          this.writeEvent(response, 'sources', { sources: event.sources });
         } else if (event.type === 'done') {
           this.writeEvent(response, 'done', {
             assistantMessage: this.serializeMessage(event.assistantMessage),
@@ -191,6 +204,13 @@ export class MessagesController {
             });
           } else if (event.type === 'delta') {
             this.writeEvent(response, 'delta', { text: event.text });
+          } else if (event.type === 'status') {
+            this.writeEvent(response, 'status', {
+              status: event.status,
+              ...(event.detail ? { detail: event.detail } : {}),
+            });
+          } else if (event.type === 'sources') {
+            this.writeEvent(response, 'sources', { sources: event.sources });
           } else if (event.type === 'done') {
             this.writeEvent(response, 'done', {
               assistantMessage: this.serializeMessage(event.assistantMessage),

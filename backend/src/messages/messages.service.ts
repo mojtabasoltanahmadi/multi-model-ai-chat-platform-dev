@@ -1,4 +1,12 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -8,9 +16,14 @@ import { ModelsService, UserPlan } from '../models/models.service';
 import { QuotaService } from '../usage/quota.service';
 import { UsageService } from '../usage/usage.service';
 import { EntitlementsService } from '../billing/entitlements.service';
+import type { PlanFeatures } from '../billing/entitlements.service';
 import { AiProviderService } from '../ai/ai-provider.service';
-import { ProviderError } from '../ai/provider-errors';
-import { GenerationRegistry, GenerationEvent } from './generation.registry';
+import { ProviderError, ProviderErrorKind } from '../ai/provider-errors';
+import {
+  GenerationRegistry,
+  GenerationEvent,
+  GenerationStatus,
+} from './generation.registry';
 import { AiModel } from '../models/ai-model.entity';
 import { FilesService, AttachedFileContext } from '../files/files.service';
 import { WebSearchService } from '../websearch/websearch.service';
@@ -21,17 +34,47 @@ const NEW_CONVERSATION_TITLE = 'گفتگوی جدید';
 const TITLE_MAX_LENGTH = 60;
 
 /**
+ * Retryable provider failures eligible for the single-hop fallback
+ * (day-7-8 contract §12): the provider may recover on another model.
+ * Everything else (auth, invalid-request, invalid-config, unknown) fails
+ * the turn immediately — retrying a bad key or a bad request is pointless.
+ */
+const FALLBACK_ELIGIBLE_KINDS: ReadonlySet<ProviderErrorKind> = new Set([
+  'timeout',
+  'rate-limit',
+  'unavailable',
+]);
+
+/** Plan-scoped access facts the generation loop needs at fallback time. */
+export interface TurnAccess {
+  /** null = all models allowed (plan allowlist from billing). */
+  allowedModelIds: string[] | null;
+  features: PlanFeatures;
+}
+
+/**
  * Events streamed to a client during a turn — both on initial send and on
  * reconnect.
  *  - meta:     once, first (send only): the persisted user row, the
- *              pre-persisted assistant row (status 'pending'), the model, and
- *              whether this send was recognized as a replay (idempotent retry).
+ *              pre-persisted assistant row (status 'pending'), the model,
+ *              whether this send was recognized as a replay (idempotent
+ *              retry), and whether the web-search phase is active for this
+ *              turn (server-decided — the client flag alone is never proof).
+ *  - status:   execution-phase narration from the closed set
+ *              ('thinking' before the first token, 'generating' at the
+ *              first delta); `detail: 'fallback'` marks the single-hop
+ *              provider switch. Ephemeral — never persisted or replayed on
+ *              reconnect; clients keep the previous phase until the next one.
  *  - search_started:   send only, web-search turns: the live search began.
  *  - search_completed: send only, web-search turns: `resultCount` hits kept;
  *              `warning` is the safe degrade notice (null when the answer
  *              uses web context). Clients show "N sources found" or the
  *              warning and keep streaming — the turn never crashes on a
  *              search failure.
+ *  - sources:  web-search turns: the turn's citations, streamed once right
+ *              after they were persisted (also forwarded to reconnecting
+ *              subscribers); clients REPLACE their copy. Sources also ride
+ *              the terminal row, so clients without this event lose nothing.
  *  - snapshot: reconnect only, first: the full content accumulated so far.
  *              The client REPLACES its copy with this — never appends.
  *  - delta:    one new text chunk. Append only. Together with the snapshot
@@ -44,9 +87,18 @@ const TITLE_MAX_LENGTH = 60;
  *              errorMessage is never part of this payload.
  */
 export type ChatStreamEvent =
-  | { type: 'meta'; userMessage: Message; assistantMessage: Message; model: AiModel; replay: boolean }
+  | {
+      type: 'meta';
+      userMessage: Message;
+      assistantMessage: Message;
+      model: AiModel;
+      replay: boolean;
+      webSearch: boolean;
+    }
+  | { type: 'status'; status: GenerationStatus; detail?: string }
   | { type: 'search_started' }
   | { type: 'search_completed'; resultCount: number; warning: string | null }
+  | { type: 'sources'; sources: MessageSource[] }
   | { type: 'snapshot'; assistantMessage: Message }
   | { type: 'delta'; text: string }
   | { type: 'done'; assistantMessage: Message }
@@ -134,8 +186,17 @@ export class MessagesService {
     fileIds?: string[],
     isAdmin = false,
     webSearchRequested = false,
-  ): Promise<{ attachments: AttachedFileContext[]; plan: UserPlan }> {
+  ): Promise<{ attachments: AttachedFileContext[]; plan: UserPlan; access: TurnAccess }> {
     await this.conversationsService.getOwned(userId, conversationId);
+
+    // Global search kill-switch (day-7-8 contract §9/§16): a turn that asks
+    // for web search while the platform feature is off fails BEFORE the SSE
+    // stream opens — silently answering without web context would let the
+    // user believe a search happened. Capability checks below then gate the
+    // model side (server-side; the frontend flag is never trusted).
+    if (webSearchRequested && !this.webSearchService.isEnabled()) {
+      throw new HttpException('جستجوی وب فعال نیست.', HttpStatus.SERVICE_UNAVAILABLE);
+    }
 
     // Entitlements are resolved FRESH from the database (subscription + plan
     // rows — never the JWT, INV-05): a payment, expiry or admin change takes
@@ -158,6 +219,13 @@ export class MessagesService {
     }
     if (!isAdmin && fileIds && fileIds.length > 0 && !entitlements.features.fileProcessing) {
       throw new ForbiddenException('پیوست فایل در طرح فعلی شما فعال نیست.');
+    }
+
+    // Model-capability gate (day-7-8 contract §8): web search is an opt-in
+    // feature only models with the `web-search` capability may serve. The
+    // frontend disables the toggle; the backend enforces it (INV-4).
+    if (webSearchRequested && !model.capabilities.includes('web-search')) {
+      throw new BadRequestException('این مدل از جستجوی وب پشتیبانی نمی‌کند.');
     }
 
     // Attached files: resolved once here (before any SSE byte is written) so
@@ -193,7 +261,14 @@ export class MessagesService {
       await this.quotaService.assertQuota(userId, entitlements.tier, entitlements.quota);
     }
 
-    return { attachments, plan: entitlements.tier };
+    return {
+      attachments,
+      plan: entitlements.tier,
+      access: {
+        allowedModelIds: entitlements.allowedModelIds,
+        features: entitlements.features,
+      },
+    };
   }
 
   /**
@@ -210,6 +285,7 @@ export class MessagesService {
     attachments: AttachedFileContext[] = [],
     plan: UserPlan = 'free',
     webSearchRequested = false,
+    access?: TurnAccess,
   ): Promise<ChatTurnHandle> {
     const { conversation, messages } =
       await this.conversationsService.getOwnedWithMessages(userId, conversationId);
@@ -342,6 +418,8 @@ export class MessagesService {
       completionResolve,
       turnUserMessage.id,
       searchActive ? { query: turnUserMessage.content } : null,
+      plan,
+      access,
     ).catch((error) => {
       // runGeneration handles its own failures; this is a last-resort net.
       this.logger.error(
@@ -358,19 +436,24 @@ export class MessagesService {
         assistantMessage: { ...assistantMessage },
         model,
         replay,
+        webSearch: searchActive,
       };
       try {
         while (true) {
           while (buffer.length > 0) {
             const event = buffer.shift()!;
             if (event.type === 'delta') yield { type: 'delta', text: event.text };
-            else if (event.type === 'search_started') yield { type: 'search_started' };
+            else if (event.type === 'status') {
+              yield { type: 'status', status: event.status, detail: event.detail };
+            } else if (event.type === 'search_started') yield { type: 'search_started' };
             else if (event.type === 'search_completed') {
               yield {
                 type: 'search_completed',
                 resultCount: event.resultCount,
                 warning: event.warning,
               };
+            } else if (event.type === 'sources') {
+              yield { type: 'sources', sources: event.sources };
             } else if (event.type === 'done') {
               yield { type: 'done', assistantMessage: event.message };
               return;
@@ -418,6 +501,10 @@ export class MessagesService {
     usageMessageId: string,
     /** Web-search descriptor for opted-in turns; null means a plain turn. */
     search: { query: string } | null,
+    /** Caller's plan — fallback accessibility re-check (contract §12). */
+    plan: UserPlan = 'free',
+    /** Plan-scoped allowlist/features re-checked for the fallback model. */
+    access?: TurnAccess,
   ): Promise<void> {
     const messageId = assistantMessage.id;
     let streamingFlipped = false;
@@ -462,6 +549,12 @@ export class MessagesService {
           sources.length,
           run.warning,
         );
+        // Citations stream BEFORE the first delta (contract §11) so the UI
+        // can render them while the answer is still generating; they also
+        // ride the terminal row for clients that missed this event.
+        if (assistantMessage.sources) {
+          this.generationRegistry.publishSources(messageId, assistantMessage.sources);
+        }
         if (run.contextBlock) {
           const last = prompt[prompt.length - 1];
           prompt = [
@@ -471,23 +564,95 @@ export class MessagesService {
         }
       }
 
-      for await (const event of this.aiProviderService.streamChat(prompt, model)) {
-        if (event.type === 'text') {
-          assistantMessage.content += event.text;
-          if (!streamingFlipped) {
-            assistantMessage.status = 'streaming';
-            streamingFlipped = true;
-            await persistProgress(true);
-          }
-          this.generationRegistry.publishDelta(messageId, event.text);
-          await persistProgress(false);
-        } else if (event.type === 'usage') {
-          providerUsage = {
-            inputTokens: event.inputTokens,
-            outputTokens: event.outputTokens,
-          };
+      // Provider loop with the single-hop fallback (day-7-8 contract §12):
+      // one retry on a RETRYABLE normalized failure (timeout / rate-limit /
+      // unavailable), only BEFORE the first published delta, only onto the
+      // admin-configured fallback model, and never back onto an already-
+      // attempted model — `attemptedModelIds` makes A→B→A loops impossible.
+      let currentModel = model;
+      const attemptedModelIds = new Set<string>([model.id]);
+      // The first provider attempt opens with the honest `thinking` label;
+      // a fallback attempt skips it (the switch already announced
+      // `generating` + `fallback`).
+      let firstAttempt = true;
+
+      while (true) {
+        // Honest execution-phase narration (contract §10): the provider is
+        // warming up / reasoning until the first token flips the phase to
+        // `generating`.
+        if (firstAttempt && !streamingFlipped) {
+          this.generationRegistry.publishStatus(messageId, 'thinking');
         }
-        // `status` events (execution phases) have no consumer yet — ignored.
+        try {
+          for await (const event of this.aiProviderService.streamChat(prompt, currentModel)) {
+            if (event.type === 'text') {
+              assistantMessage.content += event.text;
+              if (!streamingFlipped) {
+                assistantMessage.status = 'streaming';
+                streamingFlipped = true;
+                // Uniform `generating` signal coincides with the first delta
+                // (contract §11) — emitted before the text so clients that
+                // key their UI off status events never miss the phase.
+                this.generationRegistry.publishStatus(messageId, 'generating');
+                await persistProgress(true);
+              }
+              this.generationRegistry.publishDelta(messageId, event.text);
+              await persistProgress(false);
+            } else if (event.type === 'usage') {
+              providerUsage = {
+                inputTokens: event.inputTokens,
+                outputTokens: event.outputTokens,
+              };
+            } else if (event.type === 'status') {
+              // Provider-signaled phase (e.g. an extended-thinking block
+              // started). Forward only BEFORE the first published delta
+              // (contract §11 rule 2); the label is safe status narration —
+              // reasoning CONTENT never leaves the adapter (INV-12).
+              if (!streamingFlipped) {
+                this.generationRegistry.publishStatus(messageId, event.status);
+              }
+            }
+          }
+          break; // stream ended cleanly
+        } catch (error) {
+          // Fallback decision — branch on the normalized kind ONLY.
+          const retryable =
+            error instanceof ProviderError && FALLBACK_ELIGIBLE_KINDS.has(error.kind);
+          const fallbackId = currentModel.fallbackModelId;
+          if (
+            !retryable ||
+            streamingFlipped ||
+            !fallbackId ||
+            attemptedModelIds.has(fallbackId)
+          ) {
+            throw error; // final failure → the outer catch below
+          }
+          const fallback = await this.modelsService.resolveFallbackCandidate(
+            fallbackId,
+            plan,
+            access,
+          );
+          if (!fallback) {
+            // Fallback missing/inactive/not allowed for this caller — fail
+            // with the ORIGINAL provider error (never fall into a 403).
+            throw error;
+          }
+          attemptedModelIds.add(fallback.id);
+          firstAttempt = false;
+          this.logger.log(
+            `ProviderFallback messageId=${messageId} fromModel=${currentModel.id} ` +
+              `toModel=${fallback.id} kind=${error.kind}`,
+          );
+          currentModel = fallback;
+          // The assistant row is attributed to the model that will actually
+          // answer — updated BEFORE any published delta, so the terminal
+          // `done` payload, the persisted history and the usage row all
+          // agree on the fallback model (contract §12/§22.6).
+          assistantMessage.modelId = fallback.id;
+          await this.messagesRepository.update(messageId, { modelId: fallback.id });
+          await this.usageService.recordFallbackModel(usageMessageId, fallback);
+          this.generationRegistry.publishStatus(messageId, 'generating', 'fallback');
+        }
       }
 
       assistantMessage.status = 'completed';
@@ -647,6 +812,14 @@ export class MessagesService {
           const event = queue.shift()!;
           if (event.type === 'delta') {
             yield { type: 'delta', text: event.text };
+          } else if (event.type === 'status') {
+            // Live phase narration for a subscriber that attached before the
+            // first delta; statuses are never REPLAYED for earlier phases.
+            yield { type: 'status', status: event.status, detail: event.detail };
+          } else if (event.type === 'sources') {
+            // Data event: a reconnecting subscriber that attached mid-search
+            // still receives this turn's citations (idempotent replace).
+            yield { type: 'sources', sources: event.sources };
           } else if (event.type === 'search_started' || event.type === 'search_completed') {
             // Transient pre-AI phase: the snapshot already covers the row
             // state, so reconnecting clients safely skip these.

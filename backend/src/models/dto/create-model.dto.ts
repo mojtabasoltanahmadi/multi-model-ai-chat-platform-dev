@@ -6,6 +6,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  IsUUID,
   MaxLength,
 } from 'class-validator';
 import { AiProviderKind } from '../ai-model.entity';
@@ -59,6 +60,16 @@ export class CreateModelDto {
   @IsOptional()
   @IsBoolean({ message: 'وضعیت رایگان باید true یا false باشد.' })
   isFree?: boolean;
+
+  /**
+   * Optional single-hop fallback model (day-7-8 contract §12): used once,
+   * only when this model's provider fails with a retryable kind before the
+   * first streamed token. Validated in the service (must exist, be active,
+   * not self, at least as accessible as this model).
+   */
+  @IsOptional()
+  @IsUUID('4', { message: 'شناسه مدل جایگزین نامعتبر است.' })
+  fallbackModelId?: string;
 
   /** Toman per 1M input tokens; empty/0 ⇒ model is not priced (cost null). */
   @IsOptional()

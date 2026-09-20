@@ -73,6 +73,25 @@ describe('OpenAiCompatibleAdapter', () => {
     });
   });
 
+  it('signals thinking on a reasoning channel but never forwards its content (INV-12)', async () => {
+    fetchMock.mockResolvedValue(
+      sseResponse([
+        'data: {"choices":[{"delta":{"reasoning_content":"زنجیره فکر خصوصی"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"پاسخ"}}]}\n\n',
+        'data: [DONE]\n\n',
+      ]),
+    );
+
+    const events = await collect(adapter.streamChat(history, model(), new AbortController().signal));
+
+    expect(events).toEqual([
+      { type: 'status', status: 'thinking' },
+      { type: 'text', text: 'پاسخ' },
+    ]);
+    // The private reasoning text must not appear anywhere in the events.
+    expect(JSON.stringify(events)).not.toContain('زنجیره فکر خصوصی');
+  });
+
   it('ignores malformed JSON lines without crashing the stream', async () => {
     fetchMock.mockResolvedValue(
       sseResponse([
