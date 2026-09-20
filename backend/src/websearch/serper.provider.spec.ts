@@ -1,5 +1,10 @@
 import { ConfigService } from '@nestjs/config';
-import { normalizeOrganic, SerperWebSearchProvider } from './serper.provider';
+import {
+  maskApiKey,
+  normalizeApiKey,
+  normalizeOrganic,
+  SerperWebSearchProvider,
+} from './serper.provider';
 
 const configWith = (values: Record<string, unknown>) =>
   ({ get: (key: string) => values[key] }) as ConfigService;
@@ -15,7 +20,20 @@ function mockFetchJson(status: number, body: unknown) {
   global.fetch = jest.fn().mockResolvedValue({
     ok: status >= 200 && status < 300,
     status,
+    headers: { get: (name: string) => (name.toLowerCase() === 'content-type' ? 'application/json' : null) },
     json: async () => body,
+  }) as unknown as typeof fetch;
+}
+
+/** A 403/401 answered by an HTML error PAGE (network edge), not Serper's JSON API. */
+function mockFetchHtmlError(status: number) {
+  global.fetch = jest.fn().mockResolvedValue({
+    ok: false,
+    status,
+    headers: { get: (name: string) => (name.toLowerCase() === 'content-type' ? 'text/html; charset=utf-8' : null) },
+    json: async () => {
+      throw new Error('not json');
+    },
   }) as unknown as typeof fetch;
 }
 
@@ -110,5 +128,81 @@ describe('SerperWebSearchProvider', () => {
       ok: false,
       errorType: 'timeout',
     });
+  });
+
+  it('treats an HTML 403 page as unauthorized and blames the network edge, never the key', async () => {
+    // google.serper.dev is served behind Google's front end: a 403 with an
+    // HTML body means the request was blocked by client IP BEFORE Serper's
+    // application — a valid key cannot fix it (egress route must).
+    mockFetchHtmlError(403);
+    const provider = providerWithKey();
+    const warn = jest.spyOn(provider['logger'], 'warn');
+
+    await expect(provider.search('x')).resolves.toEqual({
+      ok: false,
+      errorType: 'unauthorized',
+    });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('blocked BEFORE Serper'));
+  });
+
+  it('sends a normalized X-API-KEY: config whitespace and quotes never reach the header', async () => {
+    mockFetchJson(200, { organic: [] });
+    const provider = new SerperWebSearchProvider(
+      configWith({ 'websearch.serperApiKey': '  "real-key-40-chars-long-xxxxxxxx"\r' }),
+    );
+    await provider.search('x');
+
+    const [, options] = (global.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
+    expect((options.headers as Record<string, string>)['X-API-KEY']).toBe(
+      'real-key-40-chars-long-xxxxxxxx',
+    );
+  });
+
+  it('logs key PRESENCE at boot with a masked fingerprint — never the secret', () => {
+    const provider = new SerperWebSearchProvider(
+      configWith({ 'websearch.serperApiKey': '0123456789abcdef0123456789abcdef01234567' }),
+    );
+    const log = jest.spyOn(provider['logger'], 'log');
+    provider.onModuleInit();
+
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining('SERPER KEY LOADED: 01234***** (len=40)'),
+    );
+    // The full key must not appear in the log payload.
+    expect(log.mock.calls[0][0]).not.toContain('0123456789abcdef0123456789abcdef01234567');
+  });
+
+  it('logs a MISSING key at boot (degradation warning, no crash)', () => {
+    const provider = new SerperWebSearchProvider(configWith({}));
+    const warn = jest.spyOn(provider['logger'], 'warn');
+
+    expect(() => provider.onModuleInit()).not.toThrow();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('SERPER KEY MISSING'));
+  });
+});
+
+describe('normalizeApiKey', () => {
+  it('trims whitespace including CRLF from hand-edited env files', () => {
+    expect(normalizeApiKey('  abc  ')).toBe('abc');
+    expect(normalizeApiKey('abc\r\n')).toBe('abc');
+    expect(normalizeApiKey('')).toBe('');
+  });
+
+  it('strips ONE matching pair of surrounding quotes (never inner content)', () => {
+    expect(normalizeApiKey('"abc"')).toBe('abc');
+    expect(normalizeApiKey("'abc'")).toBe('abc');
+    expect(normalizeApiKey('"abc')).toBe('"abc');
+    expect(normalizeApiKey("a'b'c")).toBe("a'b'c");
+  });
+});
+
+describe('maskApiKey', () => {
+  it('shows only a prefix and the length', () => {
+    expect(maskApiKey('0123456789abcdef')).toBe('01234***** (len=16)');
+  });
+
+  it('masks short and empty values entirely', () => {
+    expect(maskApiKey('abc')).toBe('***** (len=3)');
+    expect(maskApiKey('')).toBe('<empty>');
   });
 });

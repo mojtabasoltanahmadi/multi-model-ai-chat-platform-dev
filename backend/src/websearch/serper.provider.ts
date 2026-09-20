@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type {
   WebSearchOptions,
@@ -23,6 +23,37 @@ export const SERPER_ENDPOINT = 'https://google.serper.dev/search';
 const MAX_SNIPPET_CHARS = 500;
 
 /**
+ * Normalizes a raw SERPER_API_KEY value from the environment: trims
+ * surrounding whitespace (a stray trailing space/newline/CRLF from hand-edited
+ * env files would silently corrupt the `X-API-KEY` header) and strips ONE
+ * matching pair of surrounding quotes (no real key starts AND ends with a
+ * quote — that is shell/.env quoting left in the value).
+ */
+export function normalizeApiKey(raw: string): string {
+  const trimmed = (raw ?? '').trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return trimmed.slice(1, -1).trim();
+    }
+  }
+  return trimmed;
+}
+
+/**
+ * Safe, loggable key fingerprint: a short prefix + `*****` + the length.
+ * Never returns the full value — enough to spot truncation/quoting problems,
+ * never enough to leak the secret (keys are 40 chars; ≤8-char values are
+ * masked entirely).
+ */
+export function maskApiKey(key: string): string {
+  if (!key) return '<empty>';
+  if (key.length <= 8) return `***** (len=${key.length})`;
+  return `${key.slice(0, 5)}***** (len=${key.length})`;
+}
+
+/**
  * MVP search backend (https://serper.dev). All Serper specifics live here:
  * endpoint, headers, payload and response shape. Callers only see
  * normalized `WebSearchResult`s or a classified `WebSearchErrorType`.
@@ -31,14 +62,34 @@ const MAX_SNIPPET_CHARS = 500;
  * never logged, never returned.
  */
 @Injectable()
-export class SerperWebSearchProvider implements WebSearchProvider {
+export class SerperWebSearchProvider implements WebSearchProvider, OnModuleInit {
   readonly name = 'serper';
   private readonly logger = new Logger(SerperWebSearchProvider.name);
 
   constructor(private readonly configService: ConfigService) {}
 
+  /**
+   * Read per request (not constructor-cached): tests can re-stub config, and
+   * the value passes through `normalizeApiKey` so a mangled env value can
+   * never corrupt the auth header.
+   */
   get apiKey(): string {
-    return this.configService.get<string>('websearch.serperApiKey') ?? '';
+    return normalizeApiKey(
+      this.configService.get<string>('websearch.serperApiKey') ?? '',
+    );
+  }
+
+  /**
+   * Boot-time presence check with a MASKED fingerprint only. A 403 later in
+   * the logs can then be attributed to a loaded-vs-missing key without ever
+   * logging the secret itself.
+   */
+  onModuleInit(): void {
+    if (!this.apiKey) {
+      this.logger.warn('SERPER KEY MISSING — web search turns will degrade (misconfigured).');
+      return;
+    }
+    this.logger.log(`SERPER KEY LOADED: ${maskApiKey(this.apiKey)}`);
   }
 
   async search(query: string, options?: WebSearchOptions): Promise<WebSearchOutcome> {
@@ -85,8 +136,20 @@ export class SerperWebSearchProvider implements WebSearchProvider {
 
     if (response.status === 429) return { ok: false, errorType: 'rate_limited' };
     if (response.status === 401 || response.status === 403) {
-      // Almost certainly a missing/invalid key — say so without leaking it.
-      this.logger.warn(`Serper request rejected (HTTP ${response.status}).`);
+      // Serper's OWN auth failures are JSON bodies. A 401/403 with a
+      // non-JSON (HTML) page comes from the GOOGLE FRONT END — the request
+      // was blocked on the network edge (client IP) BEFORE Serper's
+      // application ever evaluated the key; a new key cannot fix that, the
+      // egress route (VPN/proxy) must. Log the masked fingerprint so the
+      // loaded-vs-missing question is answerable without leaking the secret.
+      const contentType = response.headers.get('content-type') ?? '';
+      const blockedBeforeSerper = !contentType.includes('json');
+      this.logger.warn(
+        `Serper request rejected (HTTP ${response.status}) key=${maskApiKey(this.apiKey)}` +
+          (blockedBeforeSerper
+            ? ' — non-JSON error page: request blocked BEFORE Serper (network/IP edge block); the API key was never evaluated.'
+            : ' — Serper rejected the key (invalid/expired/no quota).'),
+      );
       return { ok: false, errorType: 'unauthorized' };
     }
     if (!response.ok) {

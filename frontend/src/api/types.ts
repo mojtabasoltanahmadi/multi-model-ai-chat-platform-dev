@@ -179,6 +179,13 @@ export interface AiModel {
   isDefault: boolean;
   /** Declared capabilities from the closed set; empty list by default. */
   capabilities: ModelCapability[];
+  /**
+   * Single-hop fallback model id (day-7-8 §12), admin-configured. The user
+   * list carries only the hasFallback flag; admins read/set the id itself.
+   */
+  fallbackModelId: string | null;
+  /** true when a single-hop fallback is configured for this model. */
+  hasFallback: boolean;
   createdAt: string;
   hasApiKey: boolean;
 }
@@ -204,6 +211,8 @@ export interface CreateModelPayload {
   /** Toman per 1M input tokens; empty ⇒ not priced. */
   inputPricePerMillion?: string;
   outputPricePerMillion?: string;
+  /** Optional single-hop fallback model (validated server-side). */
+  fallbackModelId?: string;
   isActive?: boolean;
   isFree?: boolean;
 }
@@ -217,6 +226,8 @@ export interface UpdateModelPayload {
   capabilities?: ModelCapability[];
   inputPricePerMillion?: string | null;
   outputPricePerMillion?: string | null;
+  /** Optional single-hop fallback model; explicit null clears it. */
+  fallbackModelId?: string | null;
   isActive?: boolean;
   isFree?: boolean;
 }

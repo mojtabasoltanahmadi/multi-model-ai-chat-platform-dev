@@ -11,6 +11,7 @@ import type {
   ChatFile,
   CreatePlanPayload,
   Message,
+  MessageSource,
   Plan,
   SendMessagePayload,
   SimulateResponse,
@@ -385,6 +386,12 @@ export interface StreamMetaPayload {
    * The user row was reused; a fresh assistant row is being streamed.
    */
   replay: boolean;
+  /**
+   * true when the SERVER decided the web-search phase is active for this
+   * turn (capability + plan + global switch all satisfied) — the client
+   * flag alone is never proof a search will run.
+   */
+  webSearch: boolean;
 }
 
 export interface SearchCompletedPayload {
@@ -393,12 +400,31 @@ export interface SearchCompletedPayload {
   warning: string | null;
 }
 
+/**
+ * Execution-phase narration (day-7-8 contract §10/§11) — safe status labels
+ * about the system's own work, never chain-of-thought. `detail: 'fallback'`
+ * marks the single-hop provider switch.
+ */
+export interface StreamStatusPayload {
+  status: 'thinking' | 'generating';
+  detail?: string;
+}
+
+/** The turn's web-search citations, streamed once before the first delta. */
+export interface StreamSourcesPayload {
+  sources: MessageSource[];
+}
+
 export interface StreamEvents {
   onMeta: (payload: StreamMetaPayload) => void;
+  /** Execution phase changed (thinking → generating; detail='fallback'). */
+  onStatus?: (payload: StreamStatusPayload) => void;
   /** Web-search turn: the live search began (show "searching…"). */
   onSearchStarted?: () => void;
   /** Web-search turn: search finished — show count or the degrade warning. */
   onSearchCompleted?: (payload: SearchCompletedPayload) => void;
+  /** Web-search turn: the citations arrived (render before the first delta). */
+  onSources?: (payload: StreamSourcesPayload) => void;
   onDelta: (payload: { text: string }) => void;
   onDone: (payload: { assistantMessage: Message }) => void;
   onError: (message: string) => void;
@@ -464,9 +490,13 @@ export function streamChatMessage(
       try {
         const parsed: unknown = JSON.parse(data);
         if (event === 'meta') events.onMeta(parsed as StreamMetaPayload);
+        else if (event === 'status')
+          events.onStatus?.(parsed as StreamStatusPayload);
         else if (event === 'search_started') events.onSearchStarted?.();
         else if (event === 'search_completed')
           events.onSearchCompleted?.(parsed as SearchCompletedPayload);
+        else if (event === 'sources')
+          events.onSources?.(parsed as StreamSourcesPayload);
         else if (event === 'delta') events.onDelta(parsed as { text: string });
         else if (event === 'done') events.onDone(parsed as { assistantMessage: Message });
         // Terminal failure is emitted as `failed` by the backend; `error` is
@@ -505,6 +535,10 @@ export function streamChatMessage(
 export interface ReconnectEvents {
   /** Full content accumulated so far — REPLACE, never append. */
   onSnapshot: (assistantMessage: Message) => void;
+  /** Live execution-phase narration (only for phases after attaching). */
+  onStatus?: (payload: StreamStatusPayload) => void;
+  /** Live citations event for a subscriber that attached mid-search. */
+  onSources?: (payload: StreamSourcesPayload) => void;
   onDelta: (payload: { text: string }) => void;
   onDone: (assistantMessage: Message) => void;
   /**
@@ -562,6 +596,10 @@ export function reconnectGenerationStream(
         const parsed = JSON.parse(data) as Record<string, unknown>;
         if (event === 'snapshot') {
           events.onSnapshot(parsed.assistantMessage as Message);
+        } else if (event === 'status') {
+          events.onStatus?.(parsed as unknown as StreamStatusPayload);
+        } else if (event === 'sources') {
+          events.onSources?.(parsed as unknown as StreamSourcesPayload);
         } else if (event === 'delta') {
           events.onDelta(parsed as { text: string });
         } else if (event === 'done') {

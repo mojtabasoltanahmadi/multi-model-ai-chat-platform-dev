@@ -57,9 +57,16 @@ export class WebSearchService {
   ) {}
 
   /** Global kill-switch (`WEB_SEARCH_ENABLED`). */
+  // isEnabled(): boolean {
+  //   return this.configService.get<boolean>('websearch.enabled') ?? false;
+  // }
   isEnabled(): boolean {
-    return this.configService.get<boolean>('websearch.enabled') ?? false;
-  }
+  const enabled = this.configService.get<boolean>('websearch.enabled');
+
+  console.log('WEB SEARCH ENABLED:', enabled);
+
+  return enabled ?? false;
+}
 
   /** True when a search may actually run (enabled + provider key present). */
   isAvailable(): boolean {

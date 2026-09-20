@@ -57,6 +57,13 @@ const providerLabel: Record<AiProviderKind, string> = {
             <div class="model-table__model">
               <span class="model-table__name">{{ model.name }}</span>
               <span class="mono ltr model-table__id">{{ model.externalModelId }}</span>
+              <span
+                v-if="model.hasFallback"
+                class="model-table__fallback"
+                title="برای این مدل یک مدل جایگزین (fallback) تنظیم شده است"
+              >
+                مدل جایگزین
+              </span>
             </div>
           </td>
           <td>
@@ -292,6 +299,20 @@ const providerLabel: Record<AiProviderKind, string> = {
 .model-table__id {
   font-size: 0.72rem;
   color: var(--text-3);
+}
+
+/* Fallback-configured marker: same pill language as the default badge. */
+.model-table__fallback {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 0.66rem;
+  white-space: nowrap;
 }
 
 .model-table__default {

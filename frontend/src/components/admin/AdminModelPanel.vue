@@ -11,6 +11,8 @@ export interface PanelFormValues {
   capabilities: ModelCapability[];
   inputPricePerMillion: string;
   outputPricePerMillion: string;
+  /** '' = no fallback; otherwise the candidate model id. */
+  fallbackModelId: string;
   isActive: boolean;
   isFree: boolean;
 }
@@ -33,10 +35,12 @@ import {
 interface Props {
   /** null → create mode; otherwise edit this model. */
   model: AdminModel | null;
+  /** All models — candidates for the single-hop fallback selector. */
+  models?: AdminModel[];
   saving?: boolean;
 }
 
-const props = withDefaults(defineProps<Props>(), { saving: false });
+const props = withDefaults(defineProps<Props>(), { saving: false, models: () => [] });
 const emit = defineEmits<{
   submit: [values: PanelFormValues];
   close: [];
@@ -78,6 +82,7 @@ const values = reactive<PanelFormValues>({
   capabilities: [],
   inputPricePerMillion: '',
   outputPricePerMillion: '',
+  fallbackModelId: '',
   isActive: true,
   isFree: true,
 });
@@ -86,6 +91,11 @@ const placeholders = computed(() => providerPlaceholders[values.provider]);
 
 const validation = ref({ name: '', externalModelId: '' });
 const copied = ref(false);
+
+/** Fallback candidates: every OTHER active model (server re-validates). */
+const fallbackCandidates = computed(() =>
+  props.models.filter((candidate) => candidate.id !== props.model?.id),
+);
 
 function init(from: AdminModel | null) {
   values.name = from?.name ?? '';
@@ -98,6 +108,7 @@ function init(from: AdminModel | null) {
   values.capabilities = from?.capabilities ? [...from.capabilities] : [];
   values.inputPricePerMillion = from?.inputPricePerMillion ?? '';
   values.outputPricePerMillion = from?.outputPricePerMillion ?? '';
+  values.fallbackModelId = from?.fallbackModelId ?? '';
   values.isActive = from?.isActive ?? true;
   values.isFree = from?.isFree ?? true;
   validation.value = { name: '', externalModelId: '' };
@@ -130,6 +141,7 @@ function submit() {
     capabilities: values.capabilities,
     inputPricePerMillion: values.inputPricePerMillion.trim(),
     outputPricePerMillion: values.outputPricePerMillion.trim(),
+    fallbackModelId: values.fallbackModelId,
     isActive: values.isActive,
     isFree: values.isFree,
   });
@@ -263,6 +275,26 @@ async function copyId() {
         </div>
         <span class="panel-form__hint">
           در صورت خالی گذاشتن هر دو قیمت، هزینه این مدل محاسبه نمی‌شود. قیمت‌ها فقط در پنل مدیریت دیده می‌شوند.
+        </span>
+      </div>
+
+      <!-- مدل جایگزین (fallback تک‌مرحله‌ای) -->
+      <div class="panel-form__field">
+        <label class="panel-form__label" for="panel-fallback">مدل جایگزین (اختیاری)</label>
+        <select
+          id="panel-fallback"
+          v-model="values.fallbackModelId"
+          class="panel-form__select"
+        >
+          <option value="">بدون مدل جایگزین</option>
+          <option v-for="candidate in fallbackCandidates" :key="candidate.id" :value="candidate.id">
+            {{ candidate.name }} ({{ candidate.externalModelId }})
+          </option>
+        </select>
+        <span class="panel-form__hint">
+          اگر سرویس‌دهندهٔ این مدل قبل از اولین واژهٔ پاسخ از کار بیفتد (خطای شبکه، تأخیر بیش از حد یا
+          محدودیت نرخ)، پاسخ یک‌بار با این مدل ادامه پیدا می‌کند. مدل جایگزین باید حداقل به اندازهٔ
+          این مدل در دسترس باشد.
         </span>
       </div>
 
@@ -531,6 +563,22 @@ async function copyId() {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.6rem;
+}
+
+.panel-form__select {
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-1);
+  font: inherit;
+  cursor: pointer;
+}
+
+.panel-form__select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 @media (max-width: 640px) {
