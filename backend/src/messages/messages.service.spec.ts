@@ -1354,3 +1354,328 @@ describe('MessagesService — reconnect / recovery', () => {
     ).rejects.toThrow(NotFoundException);
   });
 });
+
+
+describe('MessagesService — Stop (user-initiated cancellation)', () => {
+  let service: MessagesService;
+  let registry: GenerationRegistry;
+  let messagesRepository: ReturnType<typeof createMockRepository>;
+  let conversationsService: {
+    getOwned: jest.Mock;
+    getOwnedWithMessages: jest.Mock;
+    renameTitle: jest.Mock;
+  };
+  let modelsService: { resolveChatModel: jest.Mock; resolveFallbackCandidate: jest.Mock };
+  let aiProviderService: { streamChat: jest.Mock };
+  let filesService: { getReadyContext: jest.Mock };
+  let webSearchService: { isEnabled: jest.Mock; runForTurn: jest.Mock };
+  let entitlementsService: { resolveForUser: jest.Mock };
+  let quotaService: { assertQuota: jest.Mock };
+  let usageService: {
+    recordTurnStart: jest.Mock;
+    recordTurnEnd: jest.Mock;
+    recordFallbackModel: jest.Mock;
+  };
+
+  const setup = () => {
+    conversationsService = {
+      getOwned: jest.fn().mockResolvedValue({ id: 'conv-1', userId: 'user-1', title: 'گفتگو' }),
+      getOwnedWithMessages: jest.fn().mockResolvedValue({
+        conversation: { id: 'conv-1', userId: 'user-1', title: 'گفتگو' },
+        messages: [],
+      }),
+      renameTitle: jest.fn().mockResolvedValue(undefined),
+    };
+    modelsService = {
+      resolveChatModel: jest.fn().mockResolvedValue({
+        id: 'model-1',
+        name: 'Mock',
+        provider: 'mock',
+        capabilities: [],
+      }),
+      resolveFallbackCandidate: jest.fn().mockResolvedValue(null),
+    };
+    messagesRepository = createMockRepository();
+    const configService = { get: () => undefined };
+    filesService = { getReadyContext: jest.fn().mockResolvedValue([]) };
+    webSearchService = {
+      isEnabled: jest.fn().mockReturnValue(false),
+      runForTurn: jest.fn(),
+    };
+    entitlementsService = { resolveForUser: jest.fn().mockResolvedValue(undefined) };
+    quotaService = { assertQuota: jest.fn().mockResolvedValue(undefined) };
+    usageService = {
+      recordTurnStart: jest.fn().mockResolvedValue(undefined),
+      recordTurnEnd: jest.fn().mockResolvedValue(undefined),
+      recordFallbackModel: jest.fn().mockResolvedValue(undefined),
+    };
+    registry = new GenerationRegistry();
+    service = new MessagesService(
+      messagesRepository as any,
+      conversationsService as any,
+      modelsService as any,
+      aiProviderService as any,
+      registry,
+      configService as any,
+      filesService as any,
+      webSearchService as any,
+      entitlementsService as any,
+      quotaService as any,
+      usageService as any,
+    );
+  };
+
+  /** Starts a turn and consumes its event feed in the background. */
+  async function begin(): Promise<{
+    handle: ChatTurnHandle;
+    events: ChatStreamEvent[];
+    done: Promise<ChatStreamEvent[]>;
+  }> {
+    const handle = await service.beginChatTurn('user-1', 'conv-1', 'سلام', undefined, undefined);
+    const events: ChatStreamEvent[] = [];
+    const done = (async () => {
+      for await (const event of handle.events) {
+        events.push(event);
+      }
+      return events;
+    })();
+    return { handle, events, done };
+  }
+
+  beforeEach(() => {
+    aiProviderService = { streamChat: jest.fn() };
+  });
+
+  it('aborts the provider stream and persists the partial row as interrupted (never completed/failed)', async () => {
+    setup();
+    let releaseSecond!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('بخش اول. ');
+      await gate;
+      yield text('این بخش بعد از توقف است');
+    });
+
+    const { handle, done } = await begin();
+    // Wait until the first delta is published, then stop the turn.
+    await sleep(20);
+    const assistantRow = handle.assistantMessage;
+    // Only the assistant row is open (pending/streaming) in the DB.
+    messagesRepository.find.mockResolvedValue([assistantRow]);
+
+    const stopPromise = service.stopConversationGeneration('user-1', 'conv-1');
+    releaseSecond(); // the provider "sends" one more token after the abort
+    const result = await stopPromise;
+    const events = await done;
+
+    expect(result.stopped).toBe(true);
+    // The authoritative final row: partial content only, honest status.
+    expect(result.message).toMatchObject({
+      id: assistantRow.id,
+      status: 'interrupted',
+      content: 'بخش اول. ',
+      errorMessage: null,
+    });
+    // Tokens after cancellation never mutated the persisted message.
+    const finalRow = messagesRepository.saved
+      .filter((row: any) => row.role === 'assistant')
+      .at(-1);
+    expect(finalRow).toMatchObject({ status: 'interrupted', content: 'بخش اول. ' });
+    // Terminal event on the feed is `cancelled`, not `failed`/`done`.
+    expect(events.at(-1)).toMatchObject({
+      type: 'cancelled',
+      assistantMessage: { status: 'interrupted' },
+    });
+    // Usage: exactly one terminal update, interrupted (tokens were consumed).
+    expect(usageService.recordTurnEnd).toHaveBeenCalledTimes(1);
+    expect(usageService.recordTurnEnd).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ outcome: 'interrupted' }),
+    );
+    // The generation is no longer live in the registry.
+    expect(registry.isLive(assistantRow.id)).toBe(false);
+  });
+
+  it('hands a cancellation signal to the provider stream (abort propagation)', async () => {
+    setup();
+    let signalStateAtCall: boolean | null = null;
+    let receivedSignal: AbortSignal | undefined;
+    aiProviderService.streamChat.mockImplementation(async function* (
+      _history: unknown,
+      _model: unknown,
+      signal?: AbortSignal,
+    ) {
+      receivedSignal = signal;
+      signalStateAtCall = signal?.aborted ?? null;
+      yield text('متن');
+      // Simulate the real adapter: an abort mid-read surfaces as an error.
+      if (signal?.aborted) throw new ProviderError('cancelled', null, 'cancelled');
+      await sleep(50);
+      yield text(' بیشتر');
+    });
+
+    const { handle, done } = await begin();
+    await sleep(10);
+    messagesRepository.find.mockResolvedValue([handle.assistantMessage]);
+    await service.stopConversationGeneration('user-1', 'conv-1');
+    const events = await done;
+
+    // streamChat received a live (non-aborted) signal at call time…
+    expect(receivedSignal).toBeInstanceOf(AbortSignal);
+    expect(signalStateAtCall).toBe(false);
+    // …the stop aborted that very signal, and the turn ended interrupted.
+    expect(receivedSignal!.aborted).toBe(true);
+    const finalRow = await handle.completion;
+    expect(finalRow.status).toBe('interrupted');
+    expect(events.at(-1)?.type).toBe('cancelled');
+  });
+
+  it('never routes a cancelled turn into the fallback (a stop stays stopped)', async () => {
+    setup();
+    // The primary model declares a fallback, and the provider stream dies
+    // with a cancellation (what an aborted adapter surfaces).
+    modelsService.resolveChatModel.mockResolvedValue({
+      id: 'model-1',
+      name: 'Primary',
+      provider: 'mock',
+      capabilities: [],
+      fallbackModelId: 'model-2',
+    });
+    modelsService.resolveFallbackCandidate.mockResolvedValue({
+      id: 'model-2',
+      name: 'Fallback',
+      provider: 'mock',
+      capabilities: [],
+    });
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      throw new ProviderError('cancelled', null, 'cancelled before first delta');
+    });
+
+    const { handle, done } = await begin();
+    const finalRow = await handle.completion;
+    const events = await done;
+
+    expect(finalRow.status).toBe('interrupted');
+    expect(finalRow.modelId).toBe('model-1'); // never re-attributed
+    expect(modelsService.resolveFallbackCandidate).not.toHaveBeenCalled();
+    expect(events.at(-1)?.type).toBe('cancelled');
+  });
+
+  it('resolves the stop-vs-completion race deterministically: abort before the final write wins', async () => {
+    setup();
+    let releaseEnd!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseEnd = resolve;
+    });
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('همه توکن‌ها ');
+      await gate; // stream not finished yet
+    });
+
+    const { handle, done } = await begin();
+    await sleep(20);
+    messagesRepository.find.mockResolvedValue([handle.assistantMessage]);
+    // Stop arrives AFTER the last token but BEFORE the stream ends.
+    const stopPromise = service.stopConversationGeneration('user-1', 'conv-1');
+    releaseEnd();
+    const result = await stopPromise;
+    await done;
+
+    expect(result.message).toMatchObject({ status: 'interrupted' });
+    const finalRow = await handle.completion;
+    expect(finalRow.status).toBe('interrupted'); // never 'completed'
+  });
+
+  it('leaves a naturally completed turn alone (cancellation after completion is a no-op)', async () => {
+    setup();
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      yield text('پاسخ کامل');
+    });
+
+    const { handle, done } = await begin();
+    await done; // generation fully terminal before the stop arrives
+
+    // The completed row is no longer open, so the lookup finds nothing.
+    messagesRepository.find.mockResolvedValue([]);
+    const result = await service.stopConversationGeneration('user-1', 'conv-1');
+
+    expect(result.stopped).toBe(false);
+    expect(result.message).toBeNull();
+    const finalRow = await handle.completion;
+    expect(finalRow.status).toBe('completed');
+    // No second terminal usage update.
+    expect(usageService.recordTurnEnd).toHaveBeenCalledTimes(1);
+    expect(usageService.recordTurnEnd).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ outcome: 'completed' }),
+    );
+  });
+
+  it('is idempotent and safe when nothing is generating (no active generation)', async () => {
+    setup();
+    messagesRepository.find.mockResolvedValue([]);
+
+    const result = await service.stopConversationGeneration('user-1', 'conv-1');
+
+    expect(result).toEqual({ stopped: false, message: null });
+    expect(messagesRepository.save).not.toHaveBeenCalled();
+    expect(usageService.recordTurnEnd).not.toHaveBeenCalled();
+  });
+
+  it('marks an orphaned pending/streaming row interrupted so a deliberate stop stays stopped', async () => {
+    setup();
+    const orphan = {
+      id: 'assistant-orphan',
+      conversationId: 'conv-1',
+      role: 'assistant',
+      content: 'ناتمام',
+      status: 'streaming',
+      errorMessage: null,
+    };
+    messagesRepository.find.mockResolvedValue([orphan]);
+
+    const result = await service.stopConversationGeneration('user-1', 'conv-1');
+
+    expect(result.stopped).toBe(true);
+    expect(result.message).toMatchObject({ id: 'assistant-orphan', status: 'interrupted' });
+    expect(orphan.status).toBe('interrupted');
+    expect(messagesRepository.save).toHaveBeenCalledWith(orphan);
+    expect(usageService.recordTurnEnd).toHaveBeenCalledWith(
+      'assistant-orphan',
+      expect.objectContaining({ outcome: 'interrupted' }),
+    );
+  });
+
+  it('rejects a stop for a conversation the caller does not own', async () => {
+    setup();
+    conversationsService.getOwned.mockRejectedValue(new NotFoundException('یافت نشد.'));
+
+    await expect(service.stopConversationGeneration('user-2', 'conv-1')).rejects.toThrow(
+      NotFoundException,
+    );
+    expect(messagesRepository.find).not.toHaveBeenCalled();
+  });
+
+  it('still completes after a client DISCONNECT (disconnect is not a cancellation)', async () => {
+    setup();
+    const chunks = ['الف ', 'ب ', 'پ'];
+    aiProviderService.streamChat.mockImplementation(async function* () {
+      for (const chunk of chunks) {
+        await sleep(10);
+        yield text(chunk);
+      }
+    });
+
+    const { handle } = await begin();
+    // Consume one delta, then break (client left) — must NOT stop the turn.
+    for await (const event of handle.events) {
+      if (event.type === 'delta') break;
+    }
+
+    const finalRow = await handle.completion;
+    expect(finalRow.status).toBe('completed');
+    expect(finalRow.content).toBe(chunks.join(''));
+  });
+});

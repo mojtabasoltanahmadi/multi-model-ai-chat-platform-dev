@@ -14,6 +14,7 @@ export type ProviderErrorKind =
   | 'auth' // provider rejected the API key (401/403) — fail fast
   | 'invalid-request' // provider rejected the request body (4xx) — fail fast
   | 'invalid-config' // model misconfigured on OUR side (missing key, bad URL, unknown provider) — fail fast
+  | 'cancelled' // the client aborted this turn (Stop button) — NOT an error, never retried
   | 'unknown'; // anything unclassifiable — fail fast
 
 export class ProviderError extends Error {

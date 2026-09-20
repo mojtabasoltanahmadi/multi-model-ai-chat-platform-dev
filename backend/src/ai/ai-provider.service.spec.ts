@@ -130,3 +130,113 @@ describe('AiProviderService — strategy selection', () => {
     ).rejects.toMatchObject({ name: 'ProviderError', kind: 'auth', httpStatus: 401 });
   });
 });
+
+describe('AiProviderService — caller cancellation propagation', () => {
+  /** Mimics the real adapters: an abort surfaces as ProviderError('timeout'). */
+  function abortableAdapter(): ProviderAdapter {
+    return {
+      async *streamChat(_history, _model, signal): AsyncGenerator<ProviderEvent> {
+        yield { type: 'text', text: 'اول' };
+        await new Promise<never>((_resolve, reject) => {
+          const rejectAborted = () =>
+            reject(
+              new ProviderError('timeout', null, 'AI request for model M timed out.'),
+            );
+          if (signal.aborted) {
+            rejectAborted();
+            return;
+          }
+          signal.addEventListener('abort', rejectAborted, { once: true });
+        });
+      },
+    };
+  }
+
+  it('reclassifies an adapter abort into ProviderError cancelled when the CALLER aborted', async () => {
+    const adapter = abortableAdapter();
+    const service = new AiProviderService(
+      adapter as never, adapter as never, adapter as never, adapter as never,
+    );
+    const controller = new AbortController();
+
+    const stream = service.streamChat(history, model('mock'), controller.signal);
+    const first = await stream.next(); // 'اول' delivered
+    expect(first.value).toMatchObject({ type: 'text', text: 'اول' });
+    controller.abort(); // user pressed Stop
+
+    await expect(stream.next()).rejects.toMatchObject({
+      name: 'ProviderError',
+      kind: 'cancelled',
+    });
+  });
+
+  it('keeps timeout classification when the abort came from SHUTDOWN, not the caller', async () => {
+    const adapter = abortableAdapter();
+    const service = new AiProviderService(
+      adapter as never, adapter as never, adapter as never, adapter as never,
+    );
+
+    const stream = service.streamChat(history, model('mock')); // no caller signal
+    await stream.next();
+    service.onModuleDestroy(); // shutdown abort
+
+    await expect(stream.next()).rejects.toMatchObject({
+      name: 'ProviderError',
+      kind: 'timeout',
+    });
+  });
+
+  it('passes an already-aborted caller signal straight through to the adapter', async () => {
+    let seenSignal: AbortSignal | null = null;
+    const probing: ProviderAdapter = {
+      async *streamChat(_history, _model, signal): AsyncGenerator<ProviderEvent> {
+        seenSignal = signal;
+        yield { type: 'text', text: 'x' };
+      },
+    };
+    const service = new AiProviderService(
+      probing as never, probing as never, probing as never, probing as never,
+    );
+    const controller = new AbortController();
+    controller.abort();
+
+    await collect(service.streamChat(history, model('mock'), controller.signal));
+    expect(seenSignal).not.toBeNull();
+    expect(seenSignal!.aborted).toBe(true);
+  });
+
+  it('propagates a mid-stream caller abort to the adapter signal (listener fires)', async () => {
+    let adapterSignal: AbortSignal | null = null;
+    const probing: ProviderAdapter = {
+      async *streamChat(_history, _model, signal): AsyncGenerator<ProviderEvent> {
+        adapterSignal = signal;
+        yield { type: 'text', text: 'x' };
+      },
+    };
+    const service = new AiProviderService(
+      probing as never, probing as never, probing as never, probing as never,
+    );
+    const controller = new AbortController();
+    const stream = service.streamChat(history, model('mock'), controller.signal);
+    await stream.next();
+    controller.abort();
+
+    expect(adapterSignal!.aborted).toBe(true);
+  });
+
+  it('never reclassifies genuine provider failures when the caller never aborted', async () => {
+    const failing: ProviderAdapter = {
+      async *streamChat(): AsyncGenerator<ProviderEvent> {
+        throw new ProviderError('timeout', null, 'AI request for model M timed out.');
+      },
+    };
+    const service = new AiProviderService(
+      failing as never, failing as never, failing as never, failing as never,
+    );
+    const controller = new AbortController(); // live, never aborted
+
+    await expect(
+      collect(service.streamChat(history, model('mock'), controller.signal)),
+    ).rejects.toMatchObject({ name: 'ProviderError', kind: 'timeout' });
+  });
+});

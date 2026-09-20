@@ -30,7 +30,12 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
  *   Completed messages replay as snapshot + done without invoking the AI.
  *   Orphaned generations (server restart) are honestly marked 'interrupted'.
  *
- * Event grammar (both endpoints):
+ * POST /:conversationId/messages/stop
+ *   Stops the conversation's active generation (user pressed Stop): aborts
+ *   the underlying provider stream, persists the partial assistant row as
+ *   'interrupted' and returns the final row. Idempotent.
+ *
+ * Event grammar (both stream endpoints):
  *   meta      → send only: { userMessage, assistantMessage(pending), model, replay, webSearch }
  *   status    → { status: 'thinking'|'generating', detail?: 'fallback' } — execution
  *               phases only, before/at the first delta; never chain-of-thought
@@ -41,6 +46,7 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
  *   delta     → { text } (append)
  *   done      → { assistantMessage } (terminal success)
  *   failed    → { assistantMessage, message } (terminal; safe message only)
+ *   cancelled → { assistantMessage } (terminal; user stopped the generation)
  *
  * Idempotency: clientMessageId (or Idempotency-Key header) reuses the user
  * row on retry (meta.replay = true) — no duplicate user rows, and content
@@ -144,6 +150,13 @@ export class MessagesController {
             assistantMessage: this.serializeMessage(event.assistantMessage),
           });
           return;
+        } else if (event.type === 'cancelled') {
+          // The generation was stopped by the user (this or another client):
+          // finalize with the persisted partial row — never a failure.
+          this.writeEvent(response, 'cancelled', {
+            assistantMessage: this.serializeMessage(event.assistantMessage),
+          });
+          return;
         } else if (event.type === 'failed') {
           this.writeEvent(response, 'failed', {
             assistantMessage: this.serializeMessage(event.assistantMessage),
@@ -161,6 +174,24 @@ export class MessagesController {
     if (!response.writableEnded && !response.destroyed) {
       response.end();
     }
+  }
+
+  /**
+   * Stops the conversation's active generation (user pressed Stop). Cancels
+   * the underlying provider stream, persists the partial assistant row as
+   * 'interrupted' and returns the final row. Idempotent — repeated calls
+   * are safe and never touch already-terminal rows.
+   */
+  @Post(':conversationId/messages/stop')
+  async stopGeneration(
+    @CurrentUser() user: { id: string },
+    @Param('conversationId', ParseUUIDPipe) conversationId: string,
+  ) {
+    const { stopped, message } = await this.messagesService.stopConversationGeneration(
+      user.id,
+      conversationId,
+    );
+    return { stopped, message: message ? this.serializeMessage(message) : null };
   }
 
   @Get(':conversationId/messages/:messageId/stream')
@@ -213,6 +244,13 @@ export class MessagesController {
             this.writeEvent(response, 'sources', { sources: event.sources });
           } else if (event.type === 'done') {
             this.writeEvent(response, 'done', {
+              assistantMessage: this.serializeMessage(event.assistantMessage),
+            });
+            return;
+          } else if (event.type === 'cancelled') {
+            // The user stopped this generation (possibly from another tab):
+            // finalize with the persisted partial row — never a failure.
+            this.writeEvent(response, 'cancelled', {
               assistantMessage: this.serializeMessage(event.assistantMessage),
             });
             return;

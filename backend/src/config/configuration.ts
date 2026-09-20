@@ -37,6 +37,9 @@ export default () => ({
     // How often an in-flight generation flushes partial content to the DB.
     // Bounds the text a crash can lose to roughly one interval of tokens.
     persistIntervalMs: parseInt(process.env.AI_PERSIST_INTERVAL_MS ?? '1500', 10),
+    // How long the Stop endpoint waits for the cancelled generation to
+    // persist its deterministic terminal row before responding without it.
+    stopSettleTimeoutMs: parseInt(process.env.AI_STOP_SETTLE_TIMEOUT_MS ?? '5000', 10),
   },
   // ---- Usage & quota (day-7-8 contract §7) ----
   // Daily message quota per plan, enforced pre-stream (429 as clean JSON).

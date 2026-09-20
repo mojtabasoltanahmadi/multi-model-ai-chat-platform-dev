@@ -25,6 +25,8 @@ export type GenerationStatus = 'thinking' | 'generating';
  *  - done:  generation finished; `message` is the final persisted row
  *  - failed: generation failed; `message` is the persisted row (status
  *           'failed'), `clientMessage` is the safe user-facing text
+ *  - cancelled: generation was stopped by the user; `message` is the
+ *           persisted row (status 'interrupted', partial content kept)
  */
 export type GenerationEvent =
   | { type: 'delta'; text: string }
@@ -33,7 +35,8 @@ export type GenerationEvent =
   | { type: 'search_completed'; resultCount: number; warning: string | null }
   | { type: 'sources'; sources: MessageSource[] }
   | { type: 'done'; message: Message }
-  | { type: 'failed'; message: Message; clientMessage: string };
+  | { type: 'failed'; message: Message; clientMessage: string }
+  | { type: 'cancelled'; message: Message };
 
 export type GenerationSubscriber = (event: GenerationEvent) => void;
 
@@ -56,11 +59,49 @@ export type GenerationSubscriber = (event: GenerationEvent) => void;
 export class GenerationRegistry {
   private readonly generations = new Map<
     string,
-    { subscribers: Set<GenerationSubscriber>; content: string }
+    {
+      subscribers: Set<GenerationSubscriber>;
+      content: string;
+      /** Aborted by `requestCancel` to stop the underlying provider stream. */
+      controller: AbortController;
+      /** Settles with the final persisted row when the loop finishes. */
+      completion: Promise<Message> | null;
+    }
   >();
 
-  register(messageId: string): void {
-    this.generations.set(messageId, { subscribers: new Set(), content: '' });
+  register(messageId: string, completion?: Promise<Message>): void {
+    this.generations.set(messageId, {
+      subscribers: new Set(),
+      content: '',
+      controller: new AbortController(),
+      completion: completion ?? null,
+    });
+  }
+
+  /**
+   * The generation's completion promise (resolves with the final persisted
+   * row, never rejects) — lets the Stop endpoint await the deterministic
+   * terminal state instead of returning before the loop finished.
+   */
+  completion(messageId: string): Promise<Message> | undefined {
+    return this.generations.get(messageId)?.completion ?? undefined;
+  }
+
+  /** The generation's cancellation signal (aborted when the user stops it). */
+  cancelSignal(messageId: string): AbortSignal | undefined {
+    return this.generations.get(messageId)?.controller.signal;
+  }
+
+  /**
+   * User-initiated stop: aborts the generation's cancellation signal so the
+   * loop stops consuming the provider stream and persists the partial row.
+   * Idempotent — aborting twice is a no-op; `false` when nothing is live.
+   */
+  requestCancel(messageId: string): boolean {
+    const generation = this.generations.get(messageId);
+    if (!generation) return false;
+    generation.controller.abort();
+    return true;
   }
 
   isLive(messageId: string): boolean {
@@ -137,6 +178,15 @@ export class GenerationRegistry {
     if (!generation) return;
     for (const subscriber of generation.subscribers) {
       subscriber({ type: 'failed', message, clientMessage });
+    }
+  }
+
+  /** Terminal event for a user-stopped generation (row status 'interrupted'). */
+  publishCancelled(messageId: string, message: Message): void {
+    const generation = this.generations.get(messageId);
+    if (!generation) return;
+    for (const subscriber of generation.subscribers) {
+      subscriber({ type: 'cancelled', message });
     }
   }
 
