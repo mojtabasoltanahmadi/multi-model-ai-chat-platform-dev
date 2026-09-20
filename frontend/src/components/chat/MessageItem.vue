@@ -177,9 +177,13 @@ function retry() {
       </p>
     </div>
 
-    <!-- Web search citations of this turn (persisted; history-safe). -->
+    <!--
+      Web search citations of this turn. They arrive via the `sources` SSE
+      event BEFORE the first delta (and persist on the row for history), so
+      they render during streaming too — sources belong to THIS turn only.
+    -->
     <MessageSources
-      v-if="!isUser && !streaming && message.sources && message.sources.length > 0"
+      v-if="!isUser && message.sources && message.sources.length > 0"
       :sources="message.sources"
     />
 

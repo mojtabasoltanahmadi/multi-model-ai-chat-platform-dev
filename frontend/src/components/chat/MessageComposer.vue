@@ -19,7 +19,11 @@ interface Props {
   streaming: boolean;
   /** Opt-in web search for the next turn (persisted by the view). */
   webSearchEnabled?: boolean;
+  /** The selected model must declare the `web-search` capability (backend enforces too). */
+  webSearchAvailable?: boolean;
   searchStatus?: SearchStatus | null;
+  /** Live execution phase of the in-flight turn (null until a status event). */
+  phase?: 'thinking' | 'generating' | null;
   /** Files added to the next message, each with its own upload state. */
   attachments?: ComposerFile[];
   /** Object URLs for image thumbnails, keyed by file id. */
@@ -41,7 +45,9 @@ const props = withDefaults(defineProps<Props>(), {
   previews: () => ({}),
   requestPreview: undefined,
   webSearchEnabled: false,
+  webSearchAvailable: false,
   searchStatus: null,
+  phase: null,
 });
 const emit = defineEmits<{
   send: [content: string];
@@ -101,11 +107,15 @@ function pickFiles() {
 }
 
 function toggleWebSearch() {
-  if (props.disabled || props.streaming) return;
+  if (props.disabled || props.streaming || !props.webSearchAvailable) return;
   emit('update:webSearchEnabled', !props.webSearchEnabled);
 }
 
-/** Single status line under the box: searching outranks generating. */
+/**
+ * Single status line under the box: searching outranks generating; the
+ * thinking phase fills the pre-delta window (provider warming up / reasoning
+ * — a backend `status` event, never fabricated client-side).
+ */
 const statusText = computed(() => {
   if (props.searchStatus?.phase === 'searching') return 'در حال جستجو در وب…';
   if (!props.streaming) return '';
@@ -113,6 +123,7 @@ const statusText = computed(() => {
     const count = props.searchStatus.resultCount.toLocaleString('fa-IR');
     return `${count} منبع پیدا شد • در حال تولید پاسخ…`;
   }
+  if (props.phase === 'thinking') return 'در حال تفکر…';
   return 'در حال تولید پاسخ…';
 });
 
@@ -237,10 +248,14 @@ defineExpose({ focus: () => textarea.value?.focus() });
           type="button"
           class="composer__search-toggle"
           :class="{ 'composer__search-toggle--active': webSearchEnabled }"
-          :disabled="disabled || streaming"
+          :disabled="disabled || streaming || !webSearchAvailable"
           :aria-pressed="webSearchEnabled"
-          :aria-label="webSearchEnabled ? 'جستجوی وب فعال است؛ برای خاموش کردن بزنید' : 'جستجوی وب خاموش است؛ برای فعال کردن بزنید'"
-          :title="webSearchEnabled ? 'جستجوی وب فعال' : 'جستجوی وب'"
+          :aria-label="webSearchAvailable
+            ? (webSearchEnabled ? 'جستجوی وب فعال است؛ برای خاموش کردن بزنید' : 'جستجوی وب خاموش است؛ برای فعال کردن بزنید')
+            : 'جستجوی وب برای این مدل در دسترس نیست'"
+          :title="webSearchAvailable
+            ? (webSearchEnabled ? 'جستجوی وب فعال' : 'جستجوی وب')
+            : 'این مدل از جستجوی وب پشتیبانی نمی‌کند'"
           @click="toggleWebSearch"
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

@@ -333,3 +333,178 @@ describe('ModelsService', () => {
     });
   });
 });
+
+describe('ModelsService — single-hop fallback configuration (day-7-8 contract §12)', () => {
+  let service: ModelsService;
+  let repository: ReturnType<typeof createMockRepository>;
+
+  const model = (overrides: Partial<any> = {}) => ({
+    id: 'model-1',
+    name: 'Primary',
+    provider: 'mock',
+    externalModelId: 'mock-1',
+    baseUrl: null,
+    apiKey: null,
+    isActive: true,
+    isFree: true,
+    isDefault: false,
+    capabilities: [],
+    fallbackModelId: null as string | null,
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    repository = createMockRepository();
+    service = new ModelsService(repository as any);
+  });
+
+  /**
+   * update()/create() look up BOTH the model being edited and the fallback
+   * candidate through findOne — the stub dispatches on the requested id so
+   * each row gets its own fixture.
+   */
+  const stubFindOne = ({
+    primary = {},
+    fallback = null as Record<string, unknown> | null,
+  } = {}) => {
+    repository.findOne.mockImplementation(async (options: any) => {
+      const id = options?.where?.id;
+      if (id === 'model-1') return model(primary);
+      if (id === 'model-2') return fallback === null ? model({ id: 'model-2' }) : model({ id: 'model-2', ...fallback });
+      return null;
+    });
+  };
+
+  describe('admin boundary rules', () => {
+    it('accepts an existing active fallback that is at least as accessible', async () => {
+      stubFindOne();
+      repository.save.mockImplementation(async (data: any) => ({ id: 'model-1', ...data }));
+
+      await expect(
+        service.update('model-1', { fallbackModelId: 'model-2' } as any),
+      ).resolves.toMatchObject({ fallbackModelId: 'model-2', hasFallback: true });
+    });
+
+    it('rejects an unknown fallback model', async () => {
+      stubFindOne();
+      await expect(
+        service.update('model-1', { fallbackModelId: 'missing-id' } as any),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+
+    it('rejects an inactive fallback model', async () => {
+      stubFindOne({ fallback: { isActive: false } });
+      await expect(
+        service.update('model-1', { fallbackModelId: 'model-2' } as any),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+
+    it('rejects self-reference', async () => {
+      stubFindOne();
+      await expect(
+        service.update('model-1', { fallbackModelId: 'model-1' } as any),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+
+    it('rejects a premium fallback for a free primary (free users must never 403 mid-turn)', async () => {
+      stubFindOne({ fallback: { isFree: false } });
+      await expect(
+        service.update('model-1', { fallbackModelId: 'model-2' } as any),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+
+    it('allows a free fallback for a premium primary', async () => {
+      stubFindOne();
+      repository.save.mockImplementation(async (data: any) => ({ id: 'model-1', ...data }));
+
+      await expect(
+        service.update('model-1', { isFree: false, fallbackModelId: 'model-2' } as any),
+      ).resolves.toMatchObject({ fallbackModelId: 'model-2' });
+    });
+
+    it('an explicit null clears the fallback without validation', async () => {
+      repository.findOne.mockResolvedValue(model({ fallbackModelId: 'model-2' }));
+      repository.save.mockImplementation(async (data: any) => ({ id: 'model-1', ...data }));
+
+      await expect(
+        service.update('model-1', { fallbackModelId: null } as any),
+      ).resolves.toMatchObject({ fallbackModelId: null, hasFallback: false });
+    });
+
+    it('validates the fallback against the EFFECTIVE accessibility on create', async () => {
+      // dto declares isFree: false, so a premium fallback is acceptable even
+      // though the default would be free.
+      repository.findOne.mockResolvedValue(model({ id: 'model-2', isFree: false }));
+      repository.save.mockImplementation(async (data: any) => ({ id: 'model-9', ...data }));
+
+      await expect(
+        service.create({
+          name: 'X',
+          provider: 'mock',
+          externalModelId: 'x',
+          isFree: false,
+          fallbackModelId: 'model-2',
+        } as any),
+      ).resolves.toMatchObject({ fallbackModelId: 'model-2' });
+    });
+  });
+
+  describe('runtime resolveFallbackCandidate', () => {
+    it('returns the candidate when active and plan-accessible', async () => {
+      repository.findOne.mockResolvedValue(model({ id: 'model-2' }));
+      await expect(
+        service.resolveFallbackCandidate('model-2', 'free'),
+      ).resolves.toMatchObject({ id: 'model-2' });
+    });
+
+    it('returns null for a missing or inactive candidate', async () => {
+      repository.findOne.mockResolvedValue(null);
+      await expect(service.resolveFallbackCandidate('x', 'free')).resolves.toBeNull();
+
+      repository.findOne.mockResolvedValue(model({ id: 'model-2', isActive: false }));
+      await expect(service.resolveFallbackCandidate('model-2', 'free')).resolves.toBeNull();
+    });
+
+    it('returns null when a free-plan caller would fall back into a premium model', async () => {
+      repository.findOne.mockResolvedValue(model({ id: 'model-2', isFree: false }));
+      await expect(service.resolveFallbackCandidate('model-2', 'free')).resolves.toBeNull();
+      await expect(service.resolveFallbackCandidate('model-2', 'premium')).resolves.toMatchObject({
+        id: 'model-2',
+      });
+    });
+
+    it('honors the plan-scoped model allowlist', async () => {
+      repository.findOne.mockResolvedValue(model({ id: 'model-2' }));
+      await expect(
+        service.resolveFallbackCandidate('model-2', 'premium', {
+          allowedModelIds: ['model-1'],
+          features: { thinking: true },
+        }),
+      ).resolves.toBeNull();
+      await expect(
+        service.resolveFallbackCandidate('model-2', 'premium', {
+          allowedModelIds: ['model-1', 'model-2'],
+          features: { thinking: true },
+        }),
+      ).resolves.toMatchObject({ id: 'model-2' });
+    });
+
+    it('refuses a reasoning-capable fallback when the plan lacks the thinking feature', async () => {
+      repository.findOne.mockResolvedValue(model({ id: 'model-2', capabilities: ['reasoning'] }));
+      await expect(
+        service.resolveFallbackCandidate('model-2', 'premium', {
+          allowedModelIds: null,
+          features: { thinking: false },
+        }),
+      ).resolves.toBeNull();
+    });
+
+    it('exposes hasFallback on the safe serializer without leaking the row', async () => {
+      repository.findOne.mockResolvedValue(model({}));
+      repository.save.mockImplementation(async (data: any) => ({ id: 'model-1', ...data }));
+      const updated = await service.update('model-1', { fallbackModelId: 'model-2' } as any);
+      expect(updated.hasFallback).toBe(true);
+      expect(updated).not.toHaveProperty('fallbackModel');
+    });
+  });
+});

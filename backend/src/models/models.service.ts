@@ -9,9 +9,15 @@ import { UpdateModelDto } from './dto/update-model.dto';
 /**
  * Shape returned to ANY client — strips the provider API key AND pricing
  * (INV-14: pricing is admin-only). Admin endpoints add the pricing back.
+ * `hasFallback` tells clients a single-hop fallback is configured (day-7-8
+ * contract §16) without leaking the fallback row itself.
  */
-export type SafeModel = Omit<AiModel, 'apiKey' | 'inputPricePerMillion' | 'outputPricePerMillion'> & {
+export type SafeModel = Omit<
+  AiModel,
+  'apiKey' | 'inputPricePerMillion' | 'outputPricePerMillion' | 'fallbackModel'
+> & {
   hasApiKey: boolean;
+  hasFallback: boolean;
 };
 
 /** Admin serializer output: SafeModel + pricing. */
@@ -56,6 +62,10 @@ export class ModelsService {
     const willBeActive = dto.isActive ?? true;
     const willBeFree = dto.isFree ?? true;
 
+    if (dto.fallbackModelId) {
+      await this.assertFallbackAllowed({ isFree: willBeFree }, dto.fallbackModelId);
+    }
+
     const model = this.modelsRepository.create({
       name: dto.name.trim(),
       provider: dto.provider,
@@ -65,6 +75,7 @@ export class ModelsService {
       capabilities: normalizeCapabilities(dto.capabilities),
       inputPricePerMillion: normalizePrice(dto.inputPricePerMillion),
       outputPricePerMillion: normalizePrice(dto.outputPricePerMillion),
+      fallbackModelId: dto.fallbackModelId ?? null,
       isActive: willBeActive,
       isFree: willBeFree,
       isDefault: false,
@@ -108,6 +119,17 @@ export class ModelsService {
     }
     if (dto.outputPricePerMillion !== undefined) {
       model.outputPricePerMillion = normalizePrice(dto.outputPricePerMillion);
+    }
+    if (dto.fallbackModelId !== undefined) {
+      // An explicit null clears the fallback; a value is validated against
+      // the model's EFFECTIVE accessibility (dto.isFree may change it too).
+      if (dto.fallbackModelId !== null) {
+        await this.assertFallbackAllowed(
+          { id: model.id, isFree: dto.isFree ?? model.isFree },
+          dto.fallbackModelId,
+        );
+      }
+      model.fallbackModelId = dto.fallbackModelId;
     }
     if (dto.isActive !== undefined) model.isActive = dto.isActive;
     if (dto.isFree !== undefined) model.isFree = dto.isFree;
@@ -194,9 +216,68 @@ export class ModelsService {
     return this.modelsRepository.find({ where: { id: In(ids) } });
   }
 
+  /**
+   * Resolves the single-hop fallback for a failing generation at runtime
+   * (day-7-8 contract §12). Returns null when the configured fallback cannot
+   * serve the caller — the turn then fails with the original provider error
+   * instead of falling back into a 403/inactive model. Fresh DB read: admin
+   * changes made after the primary was resolved are honored here.
+   */
+  async resolveFallbackCandidate(
+    fallbackModelId: string,
+    plan: UserPlan,
+    access?: { allowedModelIds: string[] | null; features: { thinking: boolean } },
+  ): Promise<AiModel | null> {
+    const fallback = await this.modelsRepository.findOne({ where: { id: fallbackModelId } });
+    if (!fallback || !fallback.isActive) return null;
+    if (plan === 'free' && !fallback.isFree) return null;
+    if (access?.allowedModelIds && !access.allowedModelIds.includes(fallback.id)) return null;
+    if (access && !access.features.thinking && fallback.capabilities.includes('reasoning')) {
+      return null;
+    }
+    return fallback;
+  }
+
+  /**
+   * Admin-boundary fallback rules (day-7-8 contract §12): the fallback must
+   * exist, be active, not be the model itself, and be at least as accessible
+   * as the primary — a free-plan model may never fall back into a
+   * free-plan-forbidden (premium) model.
+   */
+  private async assertFallbackAllowed(
+    primary: { id?: string; isFree: boolean },
+    fallbackModelId: string,
+  ): Promise<void> {
+    if (primary.id && primary.id === fallbackModelId) {
+      throw new BadRequestException('یک مدل نمی‌تواند جایگزین خودش باشد.');
+    }
+    const fallback = await this.modelsRepository.findOne({ where: { id: fallbackModelId } });
+    if (!fallback) {
+      throw new BadRequestException('مدل جایگزین پیدا نشد.');
+    }
+    if (!fallback.isActive) {
+      throw new BadRequestException('مدل جایگزین باید فعال باشد.');
+    }
+    if (primary.isFree && !fallback.isFree) {
+      throw new BadRequestException(
+        'مدل جایگزین باید حداقل به اندازه مدل اصلی در دسترس باشد.',
+      );
+    }
+  }
+
   private toSafeModel(model: AiModel): SafeModel {
-    const { apiKey, inputPricePerMillion, outputPricePerMillion, ...rest } = model;
-    return { ...rest, hasApiKey: Boolean(apiKey) };
+    const {
+      apiKey,
+      inputPricePerMillion,
+      outputPricePerMillion,
+      fallbackModel,
+      ...rest
+    } = model;
+    return {
+      ...rest,
+      hasApiKey: Boolean(apiKey),
+      hasFallback: Boolean(model.fallbackModelId),
+    };
   }
 
   private toAdminSafeModel(model: AiModel): AdminSafeModel {

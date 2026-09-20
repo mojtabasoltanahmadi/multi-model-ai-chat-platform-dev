@@ -112,6 +112,12 @@ type SearchStatus = { phase: 'searching' | 'succeeded'; resultCount: number } | 
 const webSearchEnabled = ref(false);
 /** Live search progress of the in-flight turn (null when idle). */
 const searchStatus = ref<SearchStatus>(null);
+/**
+ * Live execution phase of the in-flight turn, driven ONLY by backend
+ * `status` events (thinking → generating) — never fabricated client-side.
+ */
+type StreamPhase = 'thinking' | 'generating';
+const streamPhase = ref<StreamPhase | null>(null);
 
 /** Last-opened conversation id; restored on refresh so the user lands back where they were. */
 const ACTIVE_CONV_KEY = 'hooshyar.active-conversation';
@@ -168,6 +174,19 @@ const activeConversation = computed(
 const activeModel = computed(
   () => models.value.find((model) => model.id === selectedModelId.value) ?? null,
 );
+/**
+ * Web search is an opt-in feature only models with the `web-search`
+ * capability may serve. The composer disables the toggle; the backend
+ * re-validates on every send (INV-4).
+ */
+const webSearchAvailable = computed(() =>
+  Boolean(activeModel.value?.capabilities?.includes('web-search')),
+);
+// Switching to a model without the capability must not leave the next turn
+// silently requesting a search the backend would 400.
+watch(webSearchAvailable, (available) => {
+  if (!available && webSearchEnabled.value) webSearchEnabled.value = false;
+});
 
 onMounted(async () => {
   await Promise.all([loadConversations(), loadModels()]);
@@ -717,6 +736,7 @@ async function send(
   const streamingRow = messages.value[messages.value.length - 1] as Message;
   streaming.value = true;
   activeStreamRowId.value = STREAM_ID;
+  streamPhase.value = null;
   pinnedToBottom.value = true;
   await scrollToBottom();
 
@@ -729,6 +749,7 @@ async function send(
     activeStreamRowId.value = null;
     inflightClientMessageId.value = null;
     searchStatus.value = null;
+    streamPhase.value = null;
     // Sent files are now part of the message; only unfinished ones stay
     // attached for the next turn.
     if (fileIds.length > 0) {
@@ -737,6 +758,16 @@ async function send(
     }
     void loadConversations(); // refresh titles and ordering
     void usage.refresh(); // quota line: one cheap fetch per terminal event
+  };
+
+  /** Backend execution-phase narration; detail='fallback' notes the switch. */
+  const onStatus = ({ status, detail }: { status: StreamPhase; detail?: string }) => {
+    streamPhase.value = status;
+    if (detail === 'fallback') {
+      // The single-hop fallback fired: the answer will come from a different
+      // model (the terminal row carries its real modelId).
+      toast.info('مدل جایگزین استفاده شد.');
+    }
   };
 
   streamHandle.value = streamChatMessage(
@@ -749,6 +780,7 @@ async function send(
       webSearch,
     },
     {
+      onStatus,
       onSearchStarted: () => {
         searchStatus.value = { phase: 'searching', resultCount: 0 };
       },
@@ -757,6 +789,10 @@ async function send(
         // Degraded turn: the answer below was produced WITHOUT web
         // context — say so once instead of failing the turn.
         if (warning) toast.error(warning);
+      },
+      onSources: ({ sources }) => {
+        // Citations arrived BEFORE the first delta — render them live.
+        streamingRow.sources = sources;
       },
       onMeta: (meta) => {
         const optimistic = messages.value.find((m) => m.id === optimisticUser.id);
@@ -820,12 +856,14 @@ function recoverGeneration(row: Message) {
 
   streaming.value = true;
   activeStreamRowId.value = row.id;
+  streamPhase.value = null;
   pinnedToBottom.value = true;
 
   const finish = () => {
     streaming.value = false;
     streamHandle.value = null;
     activeStreamRowId.value = null;
+    streamPhase.value = null;
     void loadConversations();
   };
 
@@ -833,6 +871,14 @@ function recoverGeneration(row: Message) {
     onSnapshot: (assistantMessage) => {
       Object.assign(reactiveRow, assistantMessage);
       void scrollToBottom(true);
+    },
+    onStatus: ({ status, detail }) => {
+      streamPhase.value = status;
+      if (detail === 'fallback') toast.info('مدل جایگزین استفاده شد.');
+    },
+    onSources: ({ sources }) => {
+      // A subscriber that attached mid-search still receives the citations.
+      reactiveRow.sources = sources;
     },
     onDelta: ({ text }) => {
       reactiveRow.content += text;
@@ -913,6 +959,7 @@ function detachStream() {
   activeStreamRowId.value = null;
   inflightClientMessageId.value = null;
   searchStatus.value = null;
+  streamPhase.value = null;
 }
 
 function stopStreaming() {
@@ -1039,7 +1086,9 @@ function onMediaLoad() {
         :previews="previews"
         :request-preview="ensureImagePreview"
         :web-search-enabled="webSearchEnabled"
+        :web-search-available="webSearchAvailable"
         :search-status="searchStatus"
+        :phase="streamPhase"
         :quota-locked="quotaExhausted"
         :hint="activeId ? '' : 'ارسال اولین پیام، گفتگو را به‌صورت خودکار می‌سازد.'"
         @send="send"

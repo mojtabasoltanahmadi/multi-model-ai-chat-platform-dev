@@ -104,6 +104,7 @@ async function submitPanel(values: PanelFormValues) {
         capabilities: values.capabilities,
         inputPricePerMillion: values.inputPricePerMillion || undefined,
         outputPricePerMillion: values.outputPricePerMillion || undefined,
+        fallbackModelId: values.fallbackModelId || undefined,
         isActive: values.isActive,
         isFree: values.isFree,
       };
@@ -121,6 +122,8 @@ async function submitPanel(values: PanelFormValues) {
         capabilities: values.capabilities,
         inputPricePerMillion: values.inputPricePerMillion || null,
         outputPricePerMillion: values.outputPricePerMillion || null,
+        // An empty selector means "no fallback" — an explicit null clears it.
+        fallbackModelId: values.fallbackModelId || null,
         isActive: values.isActive,
         isFree: values.isFree,
       };
@@ -416,6 +419,7 @@ function logout() {
     <AdminModelPanel
       v-if="panelState"
       :model="panelModel"
+      :models="models"
       :saving="actionBusy"
       @submit="submitPanel"
       @close="panelState = null"
