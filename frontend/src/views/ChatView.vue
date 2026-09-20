@@ -15,6 +15,7 @@ import {
   fetchChatFile,
   fetchConversationFiles,
   fetchFileContent,
+  setConversationModel,
   streamChatMessage,
   reconnectGenerationStream,
   stopConversationGeneration,
@@ -176,6 +177,14 @@ const activeModel = computed(
   () => models.value.find((model) => model.id === selectedModelId.value) ?? null,
 );
 /**
+ * The system default (or first available) model. New chats and conversations
+ * WITHOUT a persisted selection start here; an existing conversation's own
+ * `modelId` always outranks it.
+ */
+const defaultModelId = computed(
+  () => models.value.find((model) => model.isDefault)?.id ?? models.value[0]?.id ?? '',
+);
+/**
  * Web search is an opt-in feature only models with the `web-search`
  * capability may serve. The composer disables the toggle; the backend
  * re-validates on every send (INV-4).
@@ -238,10 +247,53 @@ async function loadConversations() {
 async function loadModels() {
   try {
     models.value = await api<AiModel[]>('/models');
-    const fallback = models.value.find((model) => model.isDefault) ?? models.value[0];
-    if (fallback) selectedModelId.value = fallback.id;
   } catch {
     models.value = [];
+  }
+  // Fresh page state has no conversation-selected model yet: start from the
+  // system default. A loaded conversation's own model (restored in
+  // `loadMessages`) then overrides this.
+  if (defaultModelId.value) selectedModelId.value = defaultModelId.value;
+}
+
+/**
+ * Restores a conversation's model as the active selection — the source of
+ * truth rules, applied on every conversation load:
+ *   persisted model (still offered to this user) → that model;
+ *   no persisted model, or one this user can no longer access → the default.
+ * The default branch is what keeps conversations isolated: switching from a
+ * conversation with Model B into one without a selection shows the default,
+ * never the previous conversation's choice. A no-longer-available persisted
+ * value is never overwritten server-side — it is just not offered here.
+ */
+function restoreConversationModel(conversation: Conversation) {
+  const modelId = conversation.modelId;
+  if (
+    modelId &&
+    (models.value.length === 0 || models.value.some((model) => model.id === modelId))
+  ) {
+    selectedModelId.value = modelId;
+    return;
+  }
+  if (defaultModelId.value) selectedModelId.value = defaultModelId.value;
+}
+
+/**
+ * Handles a model pick from the header/composer selectors: applies it for
+ * the next turn immediately and persists it on the open conversation, so a
+ * refresh (or another device) restores this exact choice. A new chat (no
+ * conversation yet) keeps the choice in memory — it is persisted when the
+ * conversation is created with the first message or attachment.
+ */
+async function selectModel(modelId: string) {
+  if (modelId === selectedModelId.value) return;
+  selectedModelId.value = modelId;
+  const conversationId = activeId.value;
+  if (!conversationId) return;
+  try {
+    await setConversationModel(conversationId, modelId);
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : 'ثبت مدل انتخابی ناموفق بود.');
   }
 }
 
@@ -265,6 +317,19 @@ async function createConversation(): Promise<Conversation> {
   conversations.value.unshift(conversation);
   activeId.value = conversation.id;
   messages.value = [];
+  // A model picked before the conversation existed belongs to it now:
+  // persist it (awaited so persistence can never race a later selection).
+  // The default needs no pinning — conversations without an explicit choice
+  // keep following the configured default.
+  if (selectedModelId.value && selectedModelId.value !== defaultModelId.value) {
+    try {
+      await setConversationModel(conversation.id, selectedModelId.value);
+    } catch (e) {
+      // The turn itself still carries the model id explicitly; persistence
+      // is retried on the next explicit selection.
+      toast.error(e instanceof Error ? e.message : 'ثبت مدل انتخابی ناموفق بود.');
+    }
+  }
   return conversation;
 }
 
@@ -291,6 +356,9 @@ async function loadMessages() {
       `/conversations/${activeId.value}`,
     );
     messages.value = result.messages;
+    // The conversation's persisted model (if any) becomes the active
+    // selection — this is what makes the user's choice survive a refresh.
+    restoreConversationModel(result.conversation);
     recoverable = [...result.messages]
       .reverse()
       .find(
@@ -320,6 +388,9 @@ function startNewConversation() {
   webSearchEnabled.value = false;
   releasePreviews();
   uploadQueue.reset();
+  // A fresh chat has no persisted selection yet: the default applies until
+  // the user picks a model for THIS conversation.
+  selectedModelId.value = defaultModelId.value;
 }
 
 // ---- file attachments ----
@@ -1071,7 +1142,7 @@ function onMediaLoad() {
         :title="activeConversation?.title ?? 'گفتگوی تازه'"
         :models="models"
         :model-id="selectedModelId"
-        @update:model-id="selectedModelId = $event"
+        @update:model-id="selectModel"
         @open-menu="drawerOpen = true"
       />
 
@@ -1137,7 +1208,7 @@ function onMediaLoad() {
         @remove-attachment="removeAttachment"
         @retry-upload="retryUpload"
         @open-file="openFile"
-        @update:model-id="selectedModelId = $event"
+        @update:model-id="selectModel"
         @update:web-search-enabled="webSearchEnabled = $event"
       />
 

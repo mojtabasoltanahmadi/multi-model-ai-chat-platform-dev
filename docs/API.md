@@ -23,6 +23,11 @@ JWT payload: `{ sub: userId, email, role }`, expires in `JWT_EXPIRES_IN` (defaul
 | GET | `/conversations` | caller's conversations, newest first |
 | POST | `/conversations` | body `{ title? }` (empty body allowed → «گفتگوی جدید») |
 | GET | `/conversations/:conversationId` | `{ conversation, messages }` (messages oldest first) |
+| PATCH | `/conversations/:conversationId/model` | body `{ modelId: string \| null }` — persists the conversation's explicitly selected model; `null` clears it (conversation follows the system default again). Validated with the same rules as a send: unknown model → 404, inactive → 400, not allowed for the caller's plan → 403. Foreign conversation → 404. |
+
+Every conversation row carries `modelId: string \| null` — the user's explicit
+choice, restored by the UI after a refresh or a conversation switch. It is
+written only by the PATCH endpoint above, never recomputed from the default.
 
 ## Messages (streaming)
 

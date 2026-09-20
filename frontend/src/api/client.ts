@@ -9,6 +9,7 @@ import type {
   AuthResponse,
   AvailableTheme,
   ChatFile,
+  Conversation,
   CreatePlanPayload,
   Message,
   MessageSource,
@@ -161,6 +162,22 @@ export async function uploadConversationFile(
 /** Files of one conversation (statuses only — never the extracted text). */
 export function fetchConversationFiles(conversationId: string): Promise<ChatFile[]> {
   return api<ChatFile[]>(`/conversations/${conversationId}/files`);
+}
+
+/**
+ * Persists the conversation's explicitly selected model (null clears it — the
+ * conversation then follows the system default). The backend validates the
+ * model with the same rules a send enforces and stores it, so a refresh or a
+ * conversation switch restores this exact choice.
+ */
+export function setConversationModel(
+  conversationId: string,
+  modelId: string | null,
+): Promise<Conversation> {
+  return api<Conversation>(`/conversations/${conversationId}/model`, {
+    method: 'PATCH',
+    body: { modelId },
+  });
 }
 
 /** Quota/usage snapshot for the signed-in user (null quota = admin). */
