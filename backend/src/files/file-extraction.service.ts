@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { fork } from 'child_process';
 import { mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import * as XLSX from 'xlsx';
 import { InvalidPDFException, PDFParse, PasswordException } from 'pdf-parse';
 import { FileKind } from './file-validation';
@@ -68,14 +68,25 @@ export class FileExtractionService {
   private readonly ocrCachePath: string;
   /** Optional local tessdata directory for air-gapped installs. */
   private readonly ocrDataPath: string;
+  /** Primary Tesseract page-segmentation mode (see file-ocr-child.ts). */
+  private readonly ocrPsm: number;
   /** Hard budget for one OCR attempt; the child is killed after it. */
   private readonly ocrTimeoutMs: number;
 
   constructor(configService: ConfigService) {
-    this.ocrLanguage = configService.get<string>('ocr.language') ?? 'eng';
-    this.ocrCachePath =
-      configService.get<string>('ocr.cachePath') || join(tmpdir(), 'ai-chat-ocr-cache');
-    this.ocrDataPath = configService.get<string>('ocr.dataPath') || '';
+    // fas+eng: the product is Persian-first — the English-only default made
+    // Tesseract read Persian glyphs as Latin garbage. Both datasets load
+    // together; script choice happens per glyph inside the engine.
+    this.ocrLanguage = configService.get<string>('ocr.language') ?? 'fas+eng';
+    // Absolute paths: the OCR child (and tesseract's cache reads) must not
+    // depend on whoever's CWD — a relative OCR_CACHE_PATH would silently
+    // resolve differently per process on Windows.
+    this.ocrCachePath = resolve(
+      configService.get<string>('ocr.cachePath') || join(tmpdir(), 'ai-chat-ocr-cache'),
+    );
+    const dataPath = configService.get<string>('ocr.dataPath') ?? '';
+    this.ocrDataPath = dataPath ? resolve(dataPath) : '';
+    this.ocrPsm = configService.get<number>('ocr.psm') ?? 6;
     this.ocrTimeoutMs = configService.get<number>('ocr.timeoutMs') ?? 90_000;
   }
 
@@ -205,7 +216,7 @@ export class FileExtractionService {
     const tag = this.ocrLogTag(context);
     const startedAt = Date.now();
     this.logger.log(
-      `file.ocr.start ${tag} language=${this.ocrLanguage} bytes=${buffer.length}`,
+      `file.ocr.start ${tag} language=${this.ocrLanguage} psm=${this.ocrPsm} bytes=${buffer.length}`,
     );
 
     this.ensureOcrCacheDir();
@@ -245,11 +256,16 @@ export class FileExtractionService {
           return;
         }
         if (message.ok) {
-          const text = (message.text ?? '').replace(/[ \t]+\n/g, '\n').trim();
+          // The child returns already-cleaned text (conservative whitespace
+          // normalization only — characters are untouched).
+          const text = message.text ?? '';
+          const meta = message.meta ?? { width: 0, height: 0, strategy: '-', passes: 0 };
           this.logger.log(
-            `file.ocr.completed ${tag} chars=${text.length} durationMs=${Date.now() - startedAt}`,
+            `file.ocr.completed ${tag} chars=${text.length} ` +
+              `dims=${meta.width}x${meta.height} strategy=${meta.strategy} passes=${meta.passes} ` +
+              `durationMs=${Date.now() - startedAt}`,
           );
-          if (!text) {
+          if (!text.trim()) {
             finish(
               new PermanentExtractionError(
                 'متنی در این تصویر شناسایی نشد (تصویر ممکن است فاقد متن باشد).',
@@ -289,6 +305,7 @@ export class FileExtractionService {
         language: this.ocrLanguage,
         buffer,
         cachePath: this.ocrCachePath,
+        psm: this.ocrPsm,
       };
       if (this.ocrDataPath) {
         task.langPath = this.ocrDataPath;

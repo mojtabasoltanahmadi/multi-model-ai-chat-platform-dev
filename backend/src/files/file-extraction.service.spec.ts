@@ -3,7 +3,7 @@ import { fork } from 'child_process';
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
 import { InvalidPDFException, PasswordException } from 'pdf-parse';
 import { FileExtractionService, PermanentExtractionError } from './file-extraction.service';
@@ -217,7 +217,11 @@ describe('FileExtractionService — Image OCR (child-process isolation)', () => 
       expect.objectContaining({ serialization: 'advanced' }),
     );
     const task = child.send.mock.calls[0][0] as Record<string, unknown>;
-    expect(task).toMatchObject({ language: 'eng', cachePath: expect.any(String) });
+    expect(task).toMatchObject({
+      language: 'eng',
+      cachePath: expect.any(String),
+      psm: 6,
+    });
     // OCR_DATA_PATH unset → data-path options must not be sent at all.
     expect(task).not.toHaveProperty('langPath');
     expect(task).not.toHaveProperty('dataPath');
@@ -241,12 +245,13 @@ describe('FileExtractionService — Image OCR (child-process isolation)', () => 
     await pending;
 
     const task = child.send.mock.calls[0][0] as Record<string, unknown>;
-    expect(task).toMatchObject({ langPath: 'D:/tessdata', dataPath: 'D:/tessdata' });
+    // Configured paths are resolved to absolute (Windows backslashes).
+    expect(task).toMatchObject({ langPath: resolve('D:/tessdata'), dataPath: resolve('D:/tessdata') });
   });
 
-  it('returns the recognized text and releases the child', async () => {
+  it('returns the recognized (child-cleaned) text and releases the child', async () => {
     const pending = makeService().extract('image', tinyPngBuffer());
-    child.emit('message', { ok: true, text: '  Hello from OCR\n' });
+    child.emit('message', { ok: true, text: 'Hello from OCR' });
 
     await expect(pending).resolves.toEqual({ text: 'Hello from OCR' });
     expect(child.kill).toHaveBeenCalled();
