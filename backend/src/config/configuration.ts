@@ -111,5 +111,9 @@ export default () => ({
     // Optional local `tessdata` directory for air-gapped installs (skips the
     // language-data download entirely).
     dataPath: process.env.OCR_DATA_PATH ?? '',
+    // Hard budget for one OCR attempt; the OCR child process is killed after
+    // it and the attempt fails as transient (BullMQ retries). Must stay below
+    // queue.processingTimeoutMs so the OCR layer fails first and cleanly.
+    timeoutMs: parseInt(process.env.OCR_TIMEOUT_MS ?? '90000', 10),
   },
 });

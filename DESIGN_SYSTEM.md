@@ -828,6 +828,39 @@ Reason:   Continuing past the failure would upload the rest behind the user's ba
 Date:     2026-09-17
 Affected: ChatView.vue, utils/uploadQueue.ts, FileChip.vue.
 
+Decision: Chips are the draft of the conversation they were picked in, and a file stays a
+          draft until a persisted message references it
+Reason:   A chip picked in chat A must never ride into chat B — the backend would reject it as
+          a foreign attachment, but the UI must not even try, so switching conversations swaps
+          the chips exactly like the message text. On reload the same rule decides what comes
+          back: consumption lives in `messages.attached_file_ids` (server-persisted), so unsent
+          files — still processing, failed, or already READY — re-appear as chips with their
+          persisted status, and consumed files render on their message rows only. Status is
+          never the discriminator: a READY-but-unsent file would otherwise vanish on refresh.
+Date:     2026-09-20
+Affected: ChatView.vue, utils/fileRestore.ts (new), MessageComposer.vue.
+
+Decision: Removing a chip deletes the file — the × is a promise, not a local hide
+Reason:   Once unsent files survive a refresh, a chip the user deliberately removed must not
+          resurrect on the next load: the × calls DELETE /files/:id (row + object gone; the
+          backend refuses for message-referenced files, which are never draft chips). A chip
+          removed while its upload is in flight cannot abort the transfer, so the freshly
+          created row is deleted when the response arrives — and if the transfer then fails,
+          the error is swallowed: there is no chip to retry and the files queued behind it
+          must keep going.
+Date:     2026-09-20
+Affected: ChatView.vue, api/client.ts, files.controller.ts (backend).
+
+Decision: One retry affordance on the chip covers both failure stages
+Reason:   An upload failure and a FAILED processing status look identical to the user (a red
+          chip with a ✗) but recover differently: the first re-sends the in-memory File, the
+          second calls POST /files/:id/retry (FAILED → PROCESSING, same file identity) and the
+          chip returns to its processing spinner with polling resumed. Keeping the glyph in one
+          place with an accurate accessible name («تلاش دوباره برای آپلود» / «تلاش دوباره برای
+          پردازش») avoids inventing a second pattern per lifecycle stage.
+Date:     2026-09-20
+Affected: FileChip.vue, MessageComposer.vue, ChatView.vue.
+
 Decision: A conversation always opens pinned to its end, and the user is never
 locked to a running generation — switching chats (or starting a new one)
 detaches the tab from the live stream while the answer keeps generating

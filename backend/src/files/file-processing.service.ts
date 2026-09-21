@@ -170,7 +170,11 @@ export class FileProcessingService implements OnModuleInit, OnModuleDestroy {
     try {
       const buffer = await this.storage.getBuffer(file.storageKey);
       const { text } = await withTimeout(
-        this.extraction.extract(kind, buffer),
+        this.extraction.extract(kind, buffer, {
+          fileId: file.id,
+          jobId: job.jobId,
+          attempt: job.attemptsMade + 1,
+        }),
         this.processingTimeoutMs,
         () => new Error('فایل بیش از حد طول کشید'),
       );

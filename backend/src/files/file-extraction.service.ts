@@ -1,11 +1,18 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { fork } from 'child_process';
+import { mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as XLSX from 'xlsx';
 import { InvalidPDFException, PDFParse, PasswordException } from 'pdf-parse';
-import { createWorker } from 'tesseract.js';
 import { FileKind } from './file-validation';
+import {
+  OCR_CHILD_FILENAME,
+  OcrOutcome,
+  OcrReady,
+  OcrTask,
+} from './file-ocr.contract';
 
 /**
  * Error classes distinguishing transient failures (storage/network hiccups —
@@ -14,6 +21,27 @@ import { FileKind } from './file-validation';
  * (unrecoverable) versus retry-then-FAILED.
  */
 export class PermanentExtractionError extends Error {}
+
+/** Optional per-job observability context threaded from the queue processor. */
+export interface ExtractionContext {
+  fileId?: string;
+  jobId?: string;
+  attempt?: number;
+}
+
+/**
+ * tesseract.js reports worker-side failures as plain strings (err.toString()),
+ * so transport-level trouble is told apart from content-level failure by
+ * message inspection. Transport failures (language-data download, engine init)
+ * are transient: BullMQ should retry them; anything else means the image
+ * itself could not be processed and retrying can never succeed.
+ */
+const TRANSIENT_OCR_PATTERN =
+  /fetch failed|Network error while fetching|initialization failed|ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|EPIPE|UND_ERR|socket hang up|aborted/i;
+
+function isTransientOcrFailure(message: string): boolean {
+  return TRANSIENT_OCR_PATTERN.test(message);
+}
 
 /** Normalized successful extraction result. */
 export interface ExtractionResult {
@@ -24,7 +52,9 @@ export interface ExtractionResult {
  * Extraction pipelines for the three MVP kinds:
  *   pdf   → pdf-parse text extraction (page-labeled)
  *   excel → xlsx sheet serialization (Sheet | Name|Age|City table style)
- *   image → tesseract.js OCR (pure JS; works without native deps)
+ *   image → tesseract.js OCR run inside a dedicated child process (see
+ *           file-ocr-child.ts for why tesseract must never run in the API
+ *           process)
  *
  * Every extractor throws PermanentExtractionError for content-level failure
  * (corrupt pdf, unreadable workbook, OCR finding nothing) and lets transport
@@ -38,22 +68,29 @@ export class FileExtractionService {
   private readonly ocrCachePath: string;
   /** Optional local tessdata directory for air-gapped installs. */
   private readonly ocrDataPath: string;
+  /** Hard budget for one OCR attempt; the child is killed after it. */
+  private readonly ocrTimeoutMs: number;
 
   constructor(configService: ConfigService) {
     this.ocrLanguage = configService.get<string>('ocr.language') ?? 'eng';
     this.ocrCachePath =
       configService.get<string>('ocr.cachePath') || join(tmpdir(), 'ai-chat-ocr-cache');
     this.ocrDataPath = configService.get<string>('ocr.dataPath') || '';
+    this.ocrTimeoutMs = configService.get<number>('ocr.timeoutMs') ?? 90_000;
   }
 
-  async extract(kind: FileKind, buffer: Buffer): Promise<ExtractionResult> {
+  async extract(
+    kind: FileKind,
+    buffer: Buffer,
+    context: ExtractionContext = {},
+  ): Promise<ExtractionResult> {
     switch (kind) {
       case 'pdf':
         return this.extractPdf(buffer);
       case 'excel':
         return this.extractExcel(buffer);
       case 'image':
-        return this.extractImageOcr(buffer);
+        return this.extractImageOcr(buffer, context);
       default: {
         const exhaustive: never = kind;
         throw new PermanentExtractionError(`نوع فایل پشتیبانی نمی‌شود: ${String(exhaustive)}`);
@@ -158,34 +195,129 @@ export class FileExtractionService {
 
   // ---- Image / OCR ----
 
-  private async extractImageOcr(buffer: Buffer): Promise<ExtractionResult> {
-    // tesseract.js accepts image Buffers directly (pure-JS decoders; no
-    // canvas/native deps). Language data is cached in a temp dir; an offline
-    // deployment can point OCR_DATA_PATH at a local tessdata directory.
-    let worker: Awaited<ReturnType<typeof createWorker>> | null = null;
-    try {
-      const options: Record<string, unknown> = { cachePath: this.ocrCachePath };
+  private async extractImageOcr(
+    buffer: Buffer,
+    context: ExtractionContext = {},
+  ): Promise<ExtractionResult> {
+    // tesseract.js runs in a dedicated child process: a crash inside its
+    // worker threads or a hang in createWorker must never take down (or wedge)
+    // the API process. See file-ocr-child.ts for the failure modes contained.
+    const tag = this.ocrLogTag(context);
+    const startedAt = Date.now();
+    this.logger.log(
+      `file.ocr.start ${tag} language=${this.ocrLanguage} bytes=${buffer.length}`,
+    );
+
+    this.ensureOcrCacheDir();
+
+    const child = fork(join(__dirname, OCR_CHILD_FILENAME), [], {
+      serialization: 'advanced',
+      stdio: 'inherit',
+    });
+
+    return new Promise<ExtractionResult>((resolve, reject) => {
+      let settled = false;
+      let timer: NodeJS.Timeout | undefined;
+      const finish = (error: Error | null, result?: ExtractionResult) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        // Exactly one task per child — always release it, also on
+        // failure/timeout, so a stuck OCR can neither wedge the queue nor
+        // leak a process.
+        child.kill();
+        if (error) {
+          reject(error);
+        } else {
+          resolve(result as ExtractionResult);
+        }
+      };
+
+      // Bounds everything: engine boot, language-data download, recognition.
+      timer = setTimeout(() => {
+        this.logger.warn(`file.ocr.timeout ${tag} timeoutMs=${this.ocrTimeoutMs}`);
+        finish(new Error(`OCR timed out after ${this.ocrTimeoutMs}ms`));
+      }, this.ocrTimeoutMs);
+
+      child.on('message', (message: OcrOutcome | OcrReady) => {
+        if (!message || typeof message !== 'object' || !('ok' in message)) {
+          this.logger.log(`file.ocr.worker_created ${tag} bootMs=${Date.now() - startedAt}`);
+          return;
+        }
+        if (message.ok) {
+          const text = (message.text ?? '').replace(/[ \t]+\n/g, '\n').trim();
+          this.logger.log(
+            `file.ocr.completed ${tag} chars=${text.length} durationMs=${Date.now() - startedAt}`,
+          );
+          if (!text) {
+            finish(
+              new PermanentExtractionError(
+                'متنی در این تصویر شناسایی نشد (تصویر ممکن است فاقد متن باشد).',
+              ),
+            );
+          } else {
+            finish(null, { text });
+          }
+          return;
+        }
+        const reason = message.message || 'unknown OCR failure';
+        if (isTransientOcrFailure(reason)) {
+          // Transport-level (language-data download / engine init): let the
+          // error bubble as transient so BullMQ retries per its policy.
+          this.logger.warn(`file.ocr.failed_transient ${tag} reason=${reason}`);
+          finish(new Error(`OCR failed: ${reason}`));
+        } else {
+          // Content-level (e.g. undecodable image): retrying never succeeds.
+          this.logger.warn(`file.ocr.failed_permanent ${tag} reason=${reason}`);
+          finish(new PermanentExtractionError('پردازش OCR روی این تصویر ممکن نشد.'));
+        }
+      });
+      child.on('error', (error) => {
+        this.logger.warn(`file.ocr.child_error ${tag} reason=${error.message}`);
+        finish(new Error(`OCR worker process failed: ${error.message}`));
+      });
+      child.on('exit', (code, signal) => {
+        if (!settled) {
+          this.logger.warn(`file.ocr.child_died ${tag} code=${code} signal=${signal}`);
+          finish(
+            new Error(`OCR worker process died unexpectedly (code=${code} signal=${signal})`),
+          );
+        }
+      });
+
+      const task: OcrTask = {
+        language: this.ocrLanguage,
+        buffer,
+        cachePath: this.ocrCachePath,
+      };
       if (this.ocrDataPath) {
-        options.langPath = this.ocrDataPath;
-        options.dataPath = this.ocrDataPath;
+        task.langPath = this.ocrDataPath;
+        task.dataPath = this.ocrDataPath;
       }
-      worker = await createWorker(this.ocrLanguage, undefined, options);
-      const { data } = await worker.recognize(buffer);
-      const text = (data.text ?? '').replace(/[ \t]+\n/g, '\n').trim();
-      if (!text) {
-        throw new PermanentExtractionError(
-          'متنی در این تصویر شناسایی نشد (تصویر ممکن است فاقد متن باشد).',
-        );
-      }
-      return { text };
+      child.send(task, (error) => {
+        if (error) {
+          this.logger.warn(`file.ocr.send_failed ${tag} reason=${error.message}`);
+          finish(new Error(`OCR worker process failed: ${error.message}`));
+        }
+      });
+    });
+  }
+
+  /** tesseract.js never creates the cache directory itself; a missing dir makes
+   * the silently-failing cache write re-download language data on every OCR. */
+  private ensureOcrCacheDir(): void {
+    try {
+      mkdirSync(this.ocrCachePath, { recursive: true });
     } catch (error) {
-      if (error instanceof PermanentExtractionError) throw error;
       this.logger.warn(
-        `OCR failed (${error instanceof Error ? error.message : String(error)})`,
+        `file.ocr.cache_dir_unavailable path=${this.ocrCachePath}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
       );
-      throw new PermanentExtractionError('پردازش OCR روی این تصویر ممکن نشد.');
-    } finally {
-      await worker?.terminate().catch(() => undefined);
     }
+  }
+
+  private ocrLogTag(context: ExtractionContext): string {
+    return `fileId=${context.fileId ?? '-'} jobId=${context.jobId ?? '-'} attempt=${context.attempt ?? '-'}`;
   }
 }

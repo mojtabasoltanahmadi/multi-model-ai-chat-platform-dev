@@ -100,7 +100,11 @@ describe('FileProcessingService — processing a job', () => {
     await processor.processFile(makeJob());
 
     expect(storage.getBuffer).toHaveBeenCalledWith('files/user-1/conv-1/key.pdf');
-    expect(extraction.extract).toHaveBeenCalledWith('pdf', expect.any(Buffer));
+    expect(extraction.extract).toHaveBeenCalledWith(
+      'pdf',
+      expect.any(Buffer),
+      expect.objectContaining({ fileId: 'file-1', attempt: 1 }),
+    );
     const readyUpdate = updates.find((call) => call.patch.status === 'READY');
     expect(readyUpdate?.patch).toMatchObject({ extractedText: 'extracted text', errorMessage: null });
   });

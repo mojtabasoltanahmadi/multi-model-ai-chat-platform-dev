@@ -60,14 +60,16 @@ UPLOADING  → PROCESSING        worker claimed the job
 PROCESSING → READY             extraction persisted
 PROCESSING → FAILED            permanent error, or retries exhausted
 READY      → PROCESSING        explicit admin reprocess only
-FAILED     → PROCESSING        explicit admin reprocess only
+FAILED     → PROCESSING        owner retry (POST /files/:id/retry) or admin reprocess
 ```
 
 `FILE_STATUS_TRANSITIONS` + `canTransition()` in `file.entity.ts` define the table;
 `File.assertTransition()` throws a 400 for anything else, and the worker uses a conditional
 `UPDATE ... WHERE status IN ('UPLOADING','PROCESSING')` so the claim is atomic. A `READY` file
 therefore cannot silently slide back into `PROCESSING` — only `POST /admin/files/:id/reprocess`
-resets `attempts`/`errorMessage` and transitions it explicitly.
+resets `attempts`/`errorMessage` and transitions it explicitly, and a `FAILED` file comes back
+through the owner's retry endpoint or the same admin action. Both reuse the file identity:
+a retry never creates a second row or a second storage object.
 
 Invariants that hold at every moment:
 
@@ -119,6 +121,8 @@ MinIO.
 | GET | `/conversations/:conversationId/files` | files of a conversation (for reload/refresh restore) |
 | GET | `/files/:fileId` | single file status — the polling endpoint |
 | GET | `/files/:fileId/content?download=1` | owner-only bytes: inline for images/PDF (thumbnails, preview), attachment for everything else or with `download=1` |
+| DELETE | `/files/:fileId` | owner removes a **draft** attachment (no message references it): row + object deleted, so a refresh cannot resurrect a removed chip. Referenced by a message → 400. |
+| POST | `/files/:fileId/retry` | owner retries a **FAILED** file: `FAILED → PROCESSING`, fresh job, same file identity. Queue down → 503 with the row rolled back to FAILED. |
 | GET | `/admin/files?status=&limit=&offset=` | admin only; status counts + paginated rows |
 | GET | `/admin/files/stats` | admin only; row counts + live queue depth |
 | POST | `/admin/files/:fileId/reprocess` | admin only; `READY`/`FAILED` → `PROCESSING` and a fresh job |
@@ -181,8 +185,29 @@ Sending a message with attachments adds `fileIds: string[]` (≤ 6, uuids) to th
   click-outside also close). Non-previewable types (Excel) get the download path with an
   explanation instead of an empty frame. Only `READY` files are clickable — anything else gives
   a toast explaining that it is not ready yet.
-- **Refresh-safe.** Chips on historical messages are rebuilt from `attached_file_ids` resolved
-  against the conversation's file list, so a reload never loses an attachment (or its status).
+- **Chips belong to the conversation they were picked in.** Switching conversations swaps the
+  composer draft exactly like the message text: chips picked in chat A never appear in chat B's
+  composer (the backend would reject them as foreign attachments, but the UI must never even
+  try). Uploads already in flight keep running — each transfer carries its own conversation id,
+  and the files it created rehydrate when that conversation is opened again. A finished upload
+  that lands while the user hopped away and back is re-adopted as a chip, never silently lost.
+- **Refresh-safe, for drafts and history alike.** Chips on historical messages are rebuilt from
+  `attached_file_ids` resolved against the conversation's file list. Draft attachments are the
+  complement: a file is a draft until a *persisted message* references it, so unsent files —
+  whether still processing, failed, or already READY — re-appear as composer chips with their
+  persisted status after a refresh, and consumed files render on their message rows only
+  (`utils/fileRestore.ts`, unit-tested). Status is reconstructed from the database, never from
+  memory.
+- **Removing a chip deletes the file.** The × on a composer chip calls `DELETE /files/:id`, so
+  the row and the stored object are gone and a refresh cannot resurrect a deliberately removed
+  file. The backend refuses (400) when a message already references the file — history is
+  immutable. A chip removed while its upload is still in flight is remembered: when the
+  transfer completes anyway, the freshly created row is deleted instead of adopted.
+- **A failed upload and a failed processing are separately recoverable.** An upload failure
+  retries from the in-memory `File` (nothing to re-pick); a `FAILED` processing status retries
+  through `POST /files/:id/retry` (`FAILED → PROCESSING`, fresh job, same file identity) — the
+  chip flips back to the processing spinner, polling resumes, and if the queue is unreachable
+  the chip rolls honestly back to FAILED with the server's reason.
 
 ## Queue & worker
 
@@ -231,11 +256,16 @@ Retries are always bounded (3 attempts); there is no infinite loop.
   Multiple sheets are labeled; an empty sheet renders `(این شیت خالی است)`. A file with no
   sheets or no rows at all is a permanent failure. A workbook-format guard runs before parsing
   because SheetJS would otherwise "successfully" parse arbitrary text as CSV.
-- **Image / OCR** — `tesseract.js` (pure JS, no native dependencies). Language comes from
+- **Image / OCR** — `tesseract.js` (pure JS, no native dependencies), run inside a dedicated
+  child process so a tesseract crash or hang can never take down (or wedge) the API process.
+  Every attempt has a hard time budget (`OCR_TIMEOUT_MS`, default 90s) after which the child is
+  killed and the attempt fails as transient. Language comes from
   `OCR_LANGUAGE` (default `eng`); language data downloads on first use and is cached outside the
-  repository (`OCR_CACHE_PATH`, default a temp dir). Air-gapped installs can point
+  repository (`OCR_CACHE_PATH`, default a temp dir — the directory is created by the backend).
+  Air-gapped installs can point
   `OCR_DATA_PATH` at a local `tessdata` directory. An image with no recognizable text is a
-  permanent failure. If OCR cannot run in the environment, the file fails — it is never reported
+  permanent failure; transport-level OCR failures (language-data download) are transient and
+  retried by BullMQ. If OCR cannot run in the environment, the file fails — it is never reported
   as successfully processed.
 
 ## Chat integration
@@ -304,6 +334,7 @@ recoverable without manual SQL.
 | `OCR_LANGUAGE` | `eng` | tesseract language(s) |
 | `OCR_CACHE_PATH` | temp dir | language-data cache location |
 | `OCR_DATA_PATH` | *(empty)* | local `tessdata` dir for air-gapped installs |
+| `OCR_TIMEOUT_MS` | `90000` | per-attempt OCR time budget; the OCR child process is killed after it |
 
 ## Local development
 
@@ -340,6 +371,9 @@ file.processing.orphan_recovered fileId, status, attempts, conversationId
 file.processing.skipped          fileId, reason (deleted | claimed_elsewhere | terminal status)
 file.processing.worker_error     message
 file.reprocess                   fileId, adminId
+file.retry                       fileId, userId, conversationId
+file.retry.enqueue_failed        fileId
+file.deleted                     fileId, userId, conversationId, status
 ```
 
 `GET /admin/files/stats` exposes row counts per status plus live queue depth for a quick
@@ -362,15 +396,20 @@ operational view.
 
 ## Verification
 
-- `backend`: 174 unit tests (`npx jest`) — validation, state machine, extraction (real PDF +
+- `backend`: 439 unit tests (`npx jest`) — validation, state machine, extraction (real PDF +
   real xlsx + mocked OCR), processor (idempotency, permanent vs transient, retry exhaustion,
-  sweeper), upload/ownership/context rules, `Content-Disposition` hardening, multipart filename
-  decoding, content-stream authorization, and the Day 1–4 suites.
-- `scripts/file-processing-test.mjs` — 53 end-to-end checks against a live stack (upload PDF /
+  sweeper), upload/ownership/context rules, owner retry (state-machine refusal, identity reuse,
+  503 rollback when the queue is down) and owner delete (referenced-file refusal, foreign 404,
+  row-then-object order), `Content-Disposition` hardening, multipart filename decoding,
+  content-stream authorization, and the Day 1–4 suites.
+- `scripts/file-processing-test.mjs` — 66 end-to-end checks against a live stack (upload PDF /
   Excel / image → READY, corrupt file → FAILED, validation, cross-user denial, admin view,
   reprocess, refresh recovery, chat while a file is still `PROCESSING`, a Persian filename that
-  must survive upload and download, and the preview/download contract: owner bytes, inline vs
-  attachment disposition, `nosniff`, no storage key in the response, foreign/anonymous denial).
+  must survive upload and download, the preview/download contract: owner bytes, inline vs
+  attachment disposition, `nosniff`, no storage key in the response, foreign/anonymous denial —
+  plus owner delete: foreign 404, referenced 400, 204 on a draft, gone-after-delete, idempotent
+  404 on re-delete; and owner retry: foreign 404, READY refusal, FAILED → PROCESSING with the
+  error cleared, the corrupt file failing again with a reason, and the same file identity reused).
 - `frontend/tests/uploadQueue.test.mjs` — 7 checks for the sequential upload queue: one transfer
   at a time in pick order, a failure halts the queue and hands the file back, retry resumes from
   the front and then continues, dropping the failed file lets the rest run, dropping a file that is
@@ -378,6 +417,11 @@ operational view.
   ever uploaded twice, and `reset` forgets queued items while the in-flight transfer settles. There is no
   frontend test runner, so it loads the TypeScript module through Node's type stripping:
   `node --experimental-strip-types frontend/tests/uploadQueue.test.mjs`.
+- `frontend/tests/fileRestore.test.mjs` — 8 checks for the rehydration rule
+  (`utils/fileRestore.ts`): a READY-but-unsent file survives a refresh as a draft, a file
+  consumed by a sent message never returns as a chip, files in every other status are restored
+  with their persisted status, consumed and unconsumed files are classified independently, and
+  messages without attachments consume nothing. Same runner invocation as above.
 - Browser-verified, against the live stack in the preview (not by reading code): a three-file batch
   walked `pending, pending, pending` → `✓, uploading, pending` → `✓, ✓, uploading` → all `✓`, with
   the captured request intervals proving no two transfers overlapped and the order matching the
@@ -386,4 +430,4 @@ operational view.
   the third still `pending` and no request issued for it, and the retry sent that file first, the
   third only after it succeeded; a single file behaved like a one-item batch; before/after the
   reload no chip or its status was lost, and the console stayed free of Vue warnings.
-- `scripts/smoke-test.mjs` — the Day 1–4 regression suite, 75/75 green after this feature.
+- `scripts/smoke-test.mjs` — the Day 1–4 regression suite, 85/85 green after this feature.
