@@ -104,12 +104,22 @@ export default () => ({
     staleProcessingMs: parseInt(process.env.FILE_STALE_PROCESSING_MS ?? '600000', 10),
   },
   ocr: {
-    language: process.env.OCR_LANGUAGE ?? 'eng',
+    // Persian-first product: fas+eng loads both datasets; the engine picks
+    // the script per glyph. 'eng' alone reads Persian text as Latin garbage.
+    language: process.env.OCR_LANGUAGE ?? 'fas+eng',
     // Where tesseract.js caches the downloaded language data. Defaults to a
     // temp dir so the repository stays clean.
     cachePath: process.env.OCR_CACHE_PATH ?? '',
     // Optional local `tessdata` directory for air-gapped installs (skips the
     // language-data download entirely).
     dataPath: process.env.OCR_DATA_PATH ?? '',
+    // Primary Tesseract page-segmentation mode. 6 (single uniform block) is
+    // the robust default for chat uploads (documents, screenshots, photos of
+    // text); 11 (sparse text) is used internally as the one fallback pass.
+    psm: parseInt(process.env.OCR_PSM ?? '6', 10),
+    // Hard budget for one OCR attempt; the OCR child process is killed after
+    // it and the attempt fails as transient (BullMQ retries). Must stay below
+    // queue.processingTimeoutMs so the OCR layer fails first and cleanly.
+    timeoutMs: parseInt(process.env.OCR_TIMEOUT_MS ?? '90000', 10),
   },
 });

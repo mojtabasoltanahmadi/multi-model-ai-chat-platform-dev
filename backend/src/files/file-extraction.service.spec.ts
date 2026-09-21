@@ -1,5 +1,10 @@
 import { ConfigService } from '@nestjs/config';
-import { createWorker } from 'tesseract.js';
+import { fork } from 'child_process';
+import { EventEmitter } from 'node:events';
+import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import type { ChildProcess } from 'node:child_process';
 import { InvalidPDFException, PasswordException } from 'pdf-parse';
 import { FileExtractionService, PermanentExtractionError } from './file-extraction.service';
 import { legacyXlsBuffer, tinyPngBuffer, xlsxBuffer } from '../test/fixtures';
@@ -10,6 +15,12 @@ import { legacyXlsBuffer, tinyPngBuffer, xlsxBuffer } from '../test/fixtures';
  * path is covered end-to-end by scripts/file-processing-test.mjs against a
  * running stack (Node, no Jest VM) — these tests pin the mapping rules:
  * empty → permanent, corrupt/encrypted → permanent, unknown → transient.
+ *
+ * The OCR pipeline is mocked at the child_process.fork boundary: tesseract.js
+ * runs in a dedicated child process (file-ocr-child.ts) so its failures can
+ * never crash the API process; these tests pin the parent-side contract —
+ * task payload, transient-vs-permanent classification, child release, and
+ * the cache-directory creation.
  */
 jest.mock('pdf-parse', () => {
   class MockInvalidPDFException extends Error {}
@@ -30,34 +41,49 @@ jest.mock('pdf-parse', () => {
   };
 });
 
-jest.mock('tesseract.js', () => ({ createWorker: jest.fn() }));
+jest.mock('child_process', () => ({
+  ...jest.requireActual('child_process'),
+  fork: jest.fn(),
+}));
 
 const pdfModule = jest.requireMock('pdf-parse') as {
   __getText: jest.Mock;
   __destroy: jest.Mock;
 };
-const mockCreateWorker = createWorker as unknown as jest.Mock;
+const mockFork = fork as unknown as jest.Mock;
 
-function makeService(): FileExtractionService {
-  const configService = {
-    get: (key: string) =>
-      ({
-        'ocr.language': 'eng',
-        'ocr.cachePath': '/tmp/ocr-cache',
-        'ocr.dataPath': '',
-      })[key],
-  } as unknown as ConfigService;
-  return new FileExtractionService(configService);
+/** Bare-bones forked-child stub; tests emit IPC messages on it directly. */
+function makeFakeChild(): ChildProcess & { send: jest.Mock; kill: jest.Mock } {
+  const child = new EventEmitter() as unknown as ChildProcess & {
+    send: jest.Mock;
+    kill: jest.Mock;
+  };
+  const sendMock = jest.fn((...args: unknown[]) => {
+    const callback = args.find(
+      (arg) => typeof arg === 'function',
+    ) as ((err: Error | null) => void) | undefined;
+    if (callback) setImmediate(() => callback(null));
+    return true;
+  });
+  (child as unknown as { send: unknown }).send = sendMock;
+  (child as unknown as { kill: unknown }).kill = jest.fn();
+  return child;
 }
 
-/** OCR worker stub; tesseract's real engine is never touched in unit tests. */
-function stubOcr(text: string) {
-  const terminate = jest.fn().mockResolvedValue(undefined);
-  mockCreateWorker.mockResolvedValue({
-    recognize: jest.fn().mockResolvedValue({ data: { text } }),
-    terminate,
-  });
-  return { terminate };
+const specCacheDir = join(tmpdir(), `ocr-cache-spec-${process.pid}`);
+
+function makeService(overrides: Record<string, unknown> = {}): FileExtractionService {
+  const config: Record<string, unknown> = {
+    'ocr.language': 'eng',
+    'ocr.cachePath': specCacheDir,
+    'ocr.dataPath': '',
+    'ocr.timeoutMs': 5000,
+    ...overrides,
+  };
+  const configService = {
+    get: (key: string) => config[key],
+  } as unknown as ConfigService;
+  return new FileExtractionService(configService);
 }
 
 describe('FileExtractionService — PDF', () => {
@@ -165,45 +191,120 @@ describe('FileExtractionService — Excel', () => {
   });
 
   it('fails permanently for an OLE2 container that is not a workbook', async () => {
-    await expect(service.extract('excel', legacyXlsBuffer())).rejects.toBeInstanceOf(
-      PermanentExtractionError,
-    );
+    await expect(
+      service.extract('excel', legacyXlsBuffer()),
+    ).rejects.toBeInstanceOf(PermanentExtractionError);
   });
 });
 
-describe('FileExtractionService — Image OCR', () => {
-  beforeEach(() => mockCreateWorker.mockReset());
+describe('FileExtractionService — Image OCR (child-process isolation)', () => {
+  let child: ChildProcess & { send: jest.Mock; kill: jest.Mock };
 
-  it('returns the recognized text and releases the worker', async () => {
-    const { terminate } = stubOcr('  Hello from OCR\n');
-    const service = makeService();
-
-    const result = await service.extract('image', tinyPngBuffer());
-
-    expect(result.text).toBe('Hello from OCR');
-    expect(terminate).toHaveBeenCalled();
+  beforeEach(() => {
+    mockFork.mockReset();
+    child = makeFakeChild();
+    mockFork.mockReturnValue(child);
   });
 
-  it('fails honestly when the image contains no recognizable text', async () => {
-    stubOcr('   \n  ');
-    const service = makeService();
+  it('forks the compiled child with advanced serialization and sends the task', async () => {
+    const pending = makeService().extract('image', tinyPngBuffer());
+    child.emit('message', { ok: true, text: 'Hello' });
+    await pending;
 
-    await expect(service.extract('image', tinyPngBuffer())).rejects.toThrow(
-      /متنی در این تصویر شناسایی نشد/,
+    expect(mockFork).toHaveBeenCalledWith(
+      expect.stringContaining('file-ocr-child.js'),
+      [],
+      expect.objectContaining({ serialization: 'advanced' }),
     );
-  });
-
-  it('reports an OCR engine failure as permanent and terminates the worker', async () => {
-    const terminate = jest.fn().mockResolvedValue(undefined);
-    mockCreateWorker.mockResolvedValue({
-      recognize: jest.fn().mockRejectedValue(new Error('wasm blew up')),
-      terminate,
+    const task = child.send.mock.calls[0][0] as Record<string, unknown>;
+    expect(task).toMatchObject({
+      language: 'eng',
+      cachePath: expect.any(String),
+      psm: 6,
     });
-    const service = makeService();
-
-    await expect(service.extract('image', tinyPngBuffer())).rejects.toThrow(
-      /پردازش OCR روی این تصویر ممکن نشد/,
-    );
-    expect(terminate).toHaveBeenCalled();
+    // OCR_DATA_PATH unset → data-path options must not be sent at all.
+    expect(task).not.toHaveProperty('langPath');
+    expect(task).not.toHaveProperty('dataPath');
+    expect(child.kill).toHaveBeenCalled();
   });
+
+  it('creates the tesseract cache directory (tesseract never mkdirs it itself)', async () => {
+    const pending = makeService().extract('image', tinyPngBuffer());
+    child.emit('message', { ok: true, text: 'x' });
+    await pending;
+
+    expect(existsSync(specCacheDir)).toBe(true);
+  });
+
+  it('sends langPath/dataPath only when a local tessdata dir is configured', async () => {
+    const pending = makeService({ 'ocr.dataPath': 'D:/tessdata' }).extract(
+      'image',
+      tinyPngBuffer(),
+    );
+    child.emit('message', { ok: true, text: 'x' });
+    await pending;
+
+    const task = child.send.mock.calls[0][0] as Record<string, unknown>;
+    // Configured paths are resolved to absolute (Windows backslashes).
+    expect(task).toMatchObject({ langPath: resolve('D:/tessdata'), dataPath: resolve('D:/tessdata') });
+  });
+
+  it('returns the recognized (child-cleaned) text and releases the child', async () => {
+    const pending = makeService().extract('image', tinyPngBuffer());
+    child.emit('message', { ok: true, text: 'Hello from OCR' });
+
+    await expect(pending).resolves.toEqual({ text: 'Hello from OCR' });
+    expect(child.kill).toHaveBeenCalled();
+  });
+
+  it('fails permanently when the image contains no recognizable text', async () => {
+    const pending = makeService().extract('image', tinyPngBuffer());
+    child.emit('message', { ok: true, text: '   \n ' });
+
+    await expect(pending).rejects.toThrow(/متنی در این تصویر شناسایی نشد/);
+    expect(child.kill).toHaveBeenCalled();
+  });
+
+  it('treats a language-data download failure as transient (retryable)', async () => {
+    const pending = makeService().extract('image', tinyPngBuffer());
+    child.emit('message', { ok: false, message: 'TypeError: fetch failed' });
+
+    const error = await pending.catch((e) => e);
+    expect(error).not.toBeInstanceOf(PermanentExtractionError);
+    expect(error.message).toContain('fetch failed');
+    expect(child.kill).toHaveBeenCalled();
+  });
+
+  it('treats a content-level OCR failure as permanent', async () => {
+    const pending = makeService().extract('image', tinyPngBuffer());
+    child.emit('message', { ok: false, message: 'wasm blew up' });
+
+    await expect(pending).rejects.toThrow(/پردازش OCR روی این تصویر ممکن نشد/);
+  });
+
+  it('treats a crashed child as transient and releases it', async () => {
+    const pending = makeService().extract('image', tinyPngBuffer());
+    child.emit('error', new Error('spawn failure'));
+
+    const error = await pending.catch((e) => e);
+    expect(error).not.toBeInstanceOf(PermanentExtractionError);
+    expect(error.message).toContain('spawn failure');
+    expect(child.kill).toHaveBeenCalled();
+  });
+
+  it('treats an unexpected child exit as transient (no hang, no crash)', async () => {
+    const pending = makeService().extract('image', tinyPngBuffer());
+    child.emit('exit', 1, null);
+
+    const error = await pending.catch((e) => e);
+    expect(error).not.toBeInstanceOf(PermanentExtractionError);
+    expect(error.message).toContain('died unexpectedly');
+  });
+
+  it('times out and kills the child when OCR never completes', async () => {
+    const pending = makeService({ 'ocr.timeoutMs': 20 }).extract('image', tinyPngBuffer());
+
+    await expect(pending).rejects.toThrow(/OCR timed out/);
+    expect(child.kill).toHaveBeenCalled();
+  }, 2000);
 });

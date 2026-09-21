@@ -40,6 +40,8 @@ function setup({
   enqueueFails = false,
   existing = null as File | null,
   found = [] as File[],
+  referenced = false,
+  removeFails = false,
 } = {}) {
   const saved: SavedRow[] = [];
   const inserted: SavedRow[] = [];
@@ -49,6 +51,13 @@ function setup({
     addSelect: jest.fn().mockReturnThis(),
     groupBy: jest.fn().mockReturnThis(),
     getRawMany: jest.fn(async (): Promise<{ status: string; count: string }[]> => []),
+  };
+
+  // The Message query builder behind deleteOwned's consumed-reference check.
+  const messagesQueryBuilder = {
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    getExists: jest.fn(async (): Promise<boolean> => referenced),
   };
 
   const repository = {
@@ -61,9 +70,16 @@ function setup({
       return entity;
     }),
     update: jest.fn(async () => undefined),
+    remove: jest.fn(async () => {
+      if (removeFails) throw new Error('database is down');
+      return undefined;
+    }),
     findAndCount: jest.fn(async () => [found, found.length]),
     createQueryBuilder: jest.fn(() => queryBuilder),
     manager: {
+      getRepository: jest.fn(() => ({
+        createQueryBuilder: () => messagesQueryBuilder,
+      })),
       transaction: jest.fn(async (callback: (manager: unknown) => Promise<File>) => {
         if (dbFails) throw new Error('database is down');
         const manager = {
@@ -119,7 +135,7 @@ function setup({
     configService,
   );
 
-  return { service, repository, storage, queue, saved, inserted, queryBuilder };
+  return { service, repository, storage, queue, saved, inserted, queryBuilder, messagesQueryBuilder };
 }
 
 const pdfInput = {
@@ -387,5 +403,124 @@ describe('FilesService — admin statistics', () => {
       FAILED: 2,
       total: 6,
     });
+  });
+});
+
+describe('FilesService — owner retry of a FAILED file', () => {
+  it('moves a FAILED file back to PROCESSING with a fresh attempt budget', async () => {
+    const { service, repository, queue } = setup({
+      existing: makeStoredFile({ status: 'FAILED', errorMessage: 'خراب', attempts: 3 }),
+    });
+
+    const result = await service.retryProcessing('user-1', 'file-1');
+
+    expect(result).toMatchObject({ id: 'file-1', status: 'PROCESSING' });
+    expect(result.errorMessage).toBeNull();
+    expect(result.attempts).toBe(0);
+    expect(repository.save).toHaveBeenCalled();
+    expect(queue.enqueueProcessing).toHaveBeenCalledWith('file-1');
+  });
+
+  it('reuses the file identity (no duplicate row, no new upload)', async () => {
+    const { service, repository } = setup({
+      existing: makeStoredFile({ status: 'FAILED' }),
+    });
+
+    await service.retryProcessing('user-1', 'file-1');
+
+    // save() on the SAME entity row — never an insert of a second record.
+    expect(repository.save).toHaveBeenCalledWith(expect.objectContaining({ id: 'file-1' }));
+  });
+
+  it('refuses a file that is READY, UPLOADING or PROCESSING', async () => {
+    for (const status of ['READY', 'UPLOADING', 'PROCESSING'] as FileStatus[]) {
+      const { service, repository, queue } = setup({ existing: makeStoredFile({ status }) });
+
+      await expect(service.retryProcessing('user-1', 'file-1')).rejects.toMatchObject({
+        status: 400,
+      });
+      expect(repository.save).not.toHaveBeenCalled();
+      expect(queue.enqueueProcessing).not.toHaveBeenCalled();
+    }
+  });
+
+  it('404s for another user\'s file (no existence leak)', async () => {
+    // getOwned filters by userId in the query, so a foreign id returns null.
+    const { service } = setup({ existing: null });
+
+    await expect(service.retryProcessing('user-2', 'file-1')).rejects.toMatchObject({
+      status: 404,
+    });
+  });
+
+  it('rolls the row back to FAILED and returns 503 when the queue is unavailable', async () => {
+    const { service, repository } = setup({
+      existing: makeStoredFile({ status: 'FAILED' }),
+      enqueueFails: true,
+    });
+
+    await expect(service.retryProcessing('user-1', 'file-1')).rejects.toMatchObject({
+      status: 503,
+    });
+    // The row must never be left PROCESSING with no job behind it: the
+    // conditional update flips it back (only if still PROCESSING).
+    expect(repository.update).toHaveBeenCalledWith(
+      { id: 'file-1', status: 'PROCESSING' },
+      expect.objectContaining({ status: 'FAILED', errorMessage: expect.any(String) }),
+    );
+  });
+});
+
+describe('FilesService — owner delete of a draft attachment', () => {
+  it('deletes an unreferenced file: the row first, then the stored object', async () => {
+    const file = makeStoredFile({ status: 'READY' });
+    const { service, repository, storage } = setup({ existing: file, referenced: false });
+
+    await expect(service.deleteOwned('user-1', 'file-1')).resolves.toBeUndefined();
+
+    expect(repository.remove).toHaveBeenCalledWith(file);
+    expect(storage.remove).toHaveBeenCalledWith('files/user-1/conv-1/key.pdf');
+    // The reference check ran against the file's conversation.
+    expect(repository.manager.getRepository).toHaveBeenCalled();
+  });
+
+  it('rejects a file that a persisted message references (history is immutable)', async () => {
+    const { service, repository, storage } = setup({
+      existing: makeStoredFile({ status: 'READY' }),
+      referenced: true,
+    });
+
+    await expect(service.deleteOwned('user-1', 'file-1')).rejects.toMatchObject({ status: 400 });
+    expect(repository.remove).not.toHaveBeenCalled();
+    expect(storage.remove).not.toHaveBeenCalled();
+  });
+
+  it('404s for another user\'s file and never touches storage', async () => {
+    // getOwned filters by userId in the query, so a foreign id returns null.
+    const { service, storage } = setup({ existing: null });
+
+    await expect(service.deleteOwned('user-2', 'file-1')).rejects.toMatchObject({ status: 404 });
+    expect(storage.remove).not.toHaveBeenCalled();
+  });
+
+  it('removes the row even for a file that never finished processing', async () => {
+    const { service, repository } = setup({
+      existing: makeStoredFile({ status: 'UPLOADING' }),
+    });
+
+    await expect(service.deleteOwned('user-1', 'file-1')).resolves.toBeUndefined();
+    expect(repository.remove).toHaveBeenCalled();
+  });
+
+  it('propagates a database failure (the row stays, deletion can be retried)', async () => {
+    const { service, storage } = setup({
+      existing: makeStoredFile(),
+      removeFails: true,
+    });
+
+    await expect(service.deleteOwned('user-1', 'file-1')).rejects.toThrow('database is down');
+    // The object was NOT removed while the row remains — deleting again
+    // (idempotent MinIO removal) converges instead of drifting.
+    expect(storage.remove).not.toHaveBeenCalled();
   });
 });

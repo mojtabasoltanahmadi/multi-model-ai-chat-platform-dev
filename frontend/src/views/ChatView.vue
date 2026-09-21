@@ -15,6 +15,8 @@ import {
   fetchChatFile,
   fetchConversationFiles,
   fetchFileContent,
+  deleteConversationFile,
+  retryFileProcessing,
   setConversationModel,
   streamChatMessage,
   reconnectGenerationStream,
@@ -24,6 +26,7 @@ import {
 } from '../api/client';
 import type { AiModel, ChatFile, ComposerFile, Conversation, Message } from '../api/types';
 import { isImageFile } from '../utils/fileKind';
+import { draftFilesForRestore } from '../utils/fileRestore';
 import { createUploadQueue } from '../utils/uploadQueue';
 import { useToast } from '../composables/useToast';
 import { useUsage } from '../composables/useUsage';
@@ -52,6 +55,10 @@ const error = ref('');
 /**
  * File attachments (Day 5-6).
  *  - `attachments` are files waiting to be sent as context (composer chips).
+ *    They are the DRAFT of the open conversation: switching conversations
+ *    swaps the draft, exactly like the message text — a chip picked in A can
+ *    never ride into B (the backend rejects foreign attachments, but the UI
+ *    must not even try).
  *  - `filesById` is the conversation's file index, which resolves the ids
  *    stored on historical user messages so a reload still renders them.
  * Uploading is asynchronous: the response comes back UPLOADING/PROCESSING and
@@ -72,6 +79,15 @@ interface QueuedUpload {
  * ordering and the halt-on-failure rule; this view owns the chip state.
  */
 const uploadQueue = createUploadQueue<QueuedUpload>((item) => uploadOne(item));
+/**
+ * Chips the user deliberately removed while their upload was still in
+ * flight. The transfer cannot be aborted mid-multipart, so it completes
+ * server-side; when the response arrives, the freshly created row is deleted
+ * so the file cannot resurrect as a chip after the next refresh. Navigating
+ * away never adds ids here — that file belongs to its conversation and
+ * rehydrates from the server when the user returns.
+ */
+const removedUploadIds = new Set<string>();
 /** Object URLs for image thumbnails, keyed by file id (local or server). */
 const previews = ref<Record<string, string>>({});
 /** In-flight thumbnail fetches, so a chip never triggers two downloads. */
@@ -309,6 +325,15 @@ async function selectConversation(id: string) {
   error.value = '';
   pinnedToBottom.value = true;
   webSearchEnabled.value = false;
+  // The composer draft belongs to the conversation it was written in.
+  // Chips picked for A must not silently become attachments of B (the
+  // backend would reject them as foreign — FILE_WRONG_CONVERSATION — but
+  // the UI must never even attempt it). Uploads already in flight keep
+  // running: each carries its own conversation id, and the files they
+  // created rehydrate when that conversation is opened again.
+  attachments.value = [];
+  viewerFile.value = null;
+  stopAttachmentPolling();
   await loadMessages();
 }
 
@@ -344,17 +369,16 @@ async function loadMessages() {
     return;
   }
   messagesLoading.value = true;
-  // Files are loaded with the conversation so a refresh restores in-flight
-  // processing state (it is persisted server-side, never only in memory).
-  void loadConversationFiles();
   // Recovery: an assistant row still pending/streaming means a generation
   // is (or was) running server-side — re-attach instead of regenerating.
   // Latest unfinished row only; completed/failed/interrupted rows load as-is.
   let recoverable: Message | undefined;
+  let loadedMessages: Message[] | null = null;
   try {
     const result = await api<{ conversation: Conversation; messages: Message[] }>(
       `/conversations/${activeId.value}`,
     );
+    loadedMessages = result.messages;
     messages.value = result.messages;
     // The conversation's persisted model (if any) becomes the active
     // selection — this is what makes the user's choice survive a refresh.
@@ -365,6 +389,11 @@ async function loadMessages() {
         (m) =>
           m.role === 'assistant' && (m.status === 'pending' || m.status === 'streaming'),
       );
+    // Files load only once the messages are in hand: which files are draft
+    // attachments (vs. already consumed by a sent message) is decided from
+    // the persisted attached_file_ids, so a refresh restores in-flight
+    // processing state and unsent files from the server — never from memory.
+    void loadConversationFiles(loadedMessages);
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'خطا';
   } finally {
@@ -386,6 +415,7 @@ function startNewConversation() {
   viewerFile.value = null;
   pinnedToBottom.value = true;
   webSearchEnabled.value = false;
+  stopAttachmentPolling();
   releasePreviews();
   uploadQueue.reset();
   // A fresh chat has no persisted selection yet: the default applies until
@@ -395,8 +425,15 @@ function startNewConversation() {
 
 // ---- file attachments ----
 
-/** Indexes the conversation's files and resumes polling for unfinished ones. */
-async function loadConversationFiles() {
+/**
+ * Rehydrates the conversation's file state from the backend (the server, not
+ * memory, is the source of truth). Files referenced by a persisted message
+ * render on that message's row; everything else is a draft attachment and
+ * re-appears as a composer chip with its persisted status — so a READY-but-
+ * unsent file survives a refresh, and PROCESSING/FAILED files resume exactly
+ * where they were.
+ */
+async function loadConversationFiles(messages: Message[]) {
   const conversationId = activeId.value;
   if (!conversationId) return;
   try {
@@ -404,14 +441,10 @@ async function loadConversationFiles() {
     if (conversationId !== activeId.value) return; // switched meanwhile
     indexFiles(files);
 
-    // Restore unfinished uploads as composer chips so the user still sees the
-    // file that was processing when the page was reloaded (status came from
-    // the database, not from memory). READY files were already consumed by
-    // their message and are only used to label those chips.
-    const unfinished = files
-      .filter((file) => file.status !== 'READY' && !attachments.value.some((a) => a.id === file.id))
-      .map((file) => asChip(file));
-    attachments.value = [...attachments.value, ...unfinished];
+    const drafts = draftFilesForRestore(files, messages).filter(
+      (file) => !attachments.value.some((a) => a.id === file.id),
+    );
+    attachments.value = [...attachments.value, ...drafts.map((file) => asChip(file))];
     ensureAttachmentPolling();
   } catch {
     /* the file index is a convenience — chat still works without it */
@@ -515,6 +548,18 @@ function makePendingAttachment(file: File, conversationId: string): ComposerFile
  * Transfers one queued file and moves its chip to `completed`. Rejecting hands
  * the failure back to the queue, which stops until the user retries or drops
  * the chip.
+ *
+ * When the transfer settles, the chip may be gone — the outcome is decided by
+ * WHY it is gone, because the cases have different owners:
+ *   1. the chip is still there            → replace it with the server record;
+ *   2. the user removed it mid-transfer   → on success delete the row just
+ *     created (a removed file must not resurrect after a refresh); on failure
+ *     swallow the error — there is no chip to retry, and the files queued
+ *     behind it must keep going (removedUploadIds);
+ *   3. the user navigated to another chat → keep the row: the file belongs to
+ *     its own conversation and rehydrates when it is opened again;
+ *   4. same conversation, chip lost to a quick switch-and-back → re-adopt it
+ *     as a fresh chip, so a finished upload is never invisible.
  */
 async function uploadOne(item: QueuedUpload): Promise<void> {
   patchAttachment(item.id, { upload: 'uploading', uploadError: null });
@@ -523,6 +568,10 @@ async function uploadOne(item: QueuedUpload): Promise<void> {
   try {
     uploaded = await uploadConversationFile(item.conversationId, item.file);
   } catch (e) {
+    if (removedUploadIds.has(item.id)) {
+      removedUploadIds.delete(item.id);
+      return;
+    }
     patchAttachment(item.id, {
       upload: 'error',
       uploadError: e instanceof Error ? e.message : 'آپلود فایل ناموفق بود.',
@@ -530,10 +579,10 @@ async function uploadOne(item: QueuedUpload): Promise<void> {
     throw e;
   }
 
-  // The chip may be gone (removed while uploading) or belong to a conversation
-  // the user has left; either way the upload is not adopted on screen.
-  if (!attachments.value.some((file) => file.id === item.id)) {
+  if (removedUploadIds.has(item.id)) {
+    removedUploadIds.delete(item.id);
     revokePreview(item.id);
+    void deleteConversationFile(uploaded.id).catch(() => undefined);
     return;
   }
   if (item.conversationId !== activeId.value) {
@@ -546,7 +595,9 @@ async function uploadOne(item: QueuedUpload): Promise<void> {
   // The server id replaces the local placeholder. The upload is finished even
   // though the server may still be processing, so the chip shows its check now.
   const completed: ComposerFile = { ...uploaded, upload: 'completed' };
-  attachments.value = attachments.value.map((file) => (file.id === item.id ? completed : file));
+  attachments.value = attachments.value.some((file) => file.id === item.id)
+    ? attachments.value.map((file) => (file.id === item.id ? completed : file))
+    : [...attachments.value, completed];
   ensureAttachmentPolling();
 }
 
@@ -575,13 +626,72 @@ function localId(): string {
     : Math.random().toString(36).slice(2);
 }
 
+/**
+ * Removes a chip. The server row is deleted too (when one exists), so a
+ * refresh cannot resurrect a file the user deliberately removed — the backend
+ * refuses this only for files a message already references, which are not
+ * draft chips. A chip still queued/uploading cannot be aborted mid-transfer;
+ * its id is remembered so the response deletes the freshly created row.
+ */
 function removeAttachment(fileId: string) {
+  const chip = attachments.value.find((file) => file.id === fileId);
+  if (chip?.upload === 'completed') {
+    void deleteConversationFile(fileId).catch(() => undefined);
+    // filesById keeps the record: if this removal races an in-flight send that
+    // just attached the file to a message, that message row still resolves its
+    // chip. Stale entries are never read — only message references address
+    // the index.
+  } else if (chip && chip.upload !== 'error') {
+    // pending/uploading: the transfer will still complete server-side.
+    removedUploadIds.add(fileId);
+  }
   attachments.value = attachments.value.filter((file) => file.id !== fileId);
   revokePreview(fileId);
   // Dropping a chip is an explicit decision: when it was the file that halted
   // the queue, the picks still waiting for their turn may go ahead.
   uploadQueue.drop(fileId);
   ensureAttachmentPolling();
+}
+
+/**
+ * Retry entry point for a chip's retry button: a client-side upload failure
+ * re-sends the in-memory File; a FAILED server status restarts extraction
+ * through the API. The two failures are different lifecycle stages and stay
+ * separately recoverable.
+ */
+function onRetryAttachment(fileId: string) {
+  const chip = attachments.value.find((file) => file.id === fileId);
+  if (!chip) return;
+  if (chip.upload === 'error') {
+    retryUpload(fileId);
+    return;
+  }
+  if (chip.upload === 'completed' && chip.status === 'FAILED') void retryProcessing(fileId);
+}
+
+/**
+ * Retries a file whose PROCESSING failed: optimistically flips the chip back
+ * to PROCESSING (the polling loop takes over from there) and rolls the chip
+ * honestly back to FAILED if the backend refuses or the network is gone.
+ */
+async function retryProcessing(fileId: string) {
+  const chip = attachments.value.find((file) => file.id === fileId);
+  if (!chip || chip.status !== 'FAILED') return;
+  const previousError = chip.errorMessage;
+  patchAttachment(fileId, { status: 'PROCESSING', errorMessage: null, attempts: 0 });
+  try {
+    const updated = await retryFileProcessing(fileId);
+    indexFiles([updated]);
+    patchAttachment(fileId, { ...updated });
+    ensureAttachmentPolling();
+  } catch (e) {
+    patchAttachment(fileId, {
+      status: 'FAILED',
+      errorMessage:
+        e instanceof Error ? e.message : (previousError ?? 'پردازش فایل ناموفق بود.'),
+    });
+    toast.error('شروع پردازش مجدد ناموفق بود.');
+  }
 }
 
 /** A server file shown in the composer: its upload has already succeeded. */
@@ -1206,7 +1316,7 @@ function onMediaLoad() {
         @stop="stopStreaming"
         @attach="attachFiles"
         @remove-attachment="removeAttachment"
-        @retry-upload="retryUpload"
+        @retry-attachment="onRetryAttachment"
         @open-file="openFile"
         @update:model-id="selectModel"
         @update:web-search-enabled="webSearchEnabled = $event"

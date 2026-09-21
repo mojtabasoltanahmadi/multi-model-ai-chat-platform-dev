@@ -1,5 +1,7 @@
 import {
   BadRequestException,
+  HttpException,
+  HttpStatus,
   Inject,
   Injectable,
   Logger,
@@ -15,6 +17,7 @@ import { FILE_JOB_QUEUE, FileJobQueue } from './file-queue.port';
 import { FileStorageService } from './file-storage.service';
 import { FileKind, sanitizeOriginalName, validateUploadedFile } from './file-validation';
 import { DEFAULT_MAX_FILES_PER_MESSAGE } from '../config/configuration';
+import { Message } from '../messages/message.entity';
 
 /**
  * Shape returned by every file API. Neither the extracted text (potentially
@@ -258,6 +261,78 @@ export class FilesService {
     await this.queue.enqueueProcessing(file.id);
     this.logger.log(`file.reprocess fileId=${fileId} adminId=${adminUserId}`);
     return this.toSafeFile(file);
+  }
+
+  /**
+   * Owner retry for a FAILED file: the same file identity is reused — no new
+   * row, no new storage object (Section 8 retry semantics). The state machine
+   * allows only FAILED → PROCESSING here, so a READY or still-running file
+   * can never be double-processed. On enqueue failure the row is put back to
+   * FAILED (a legal transition) and a 503 is returned: the UI must not show
+   * PROCESSING with no job behind it.
+   */
+  async retryProcessing(userId: string, fileId: string): Promise<SafeFile> {
+    const file = await this.getOwned(userId, fileId);
+    if (file.status !== 'FAILED') {
+      throw new BadRequestException('فقط فایل‌های ناموفق قابل پردازش مجدد هستند.');
+    }
+    file.assertTransition('PROCESSING');
+    file.attempts = 0;
+    file.errorMessage = null;
+    await this.filesRepository.save(file);
+
+    try {
+      await this.queue.enqueueProcessing(file.id);
+    } catch (error) {
+      this.logger.error(
+        `file.retry.enqueue_failed fileId=${fileId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      await this.filesRepository.update(
+        { id: file.id, status: 'PROCESSING' as FileStatus },
+        {
+          status: 'FAILED' as FileStatus,
+          errorMessage: 'شروع پردازش مجدد ناموفق بود. لطفاً دوباره تلاش کنید.',
+        },
+      );
+      throw new HttpException(
+        'شروع پردازش مجدد ناموفق بود. لطفاً دوباره تلاش کنید.',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+
+    this.logger.log(`file.retry fileId=${fileId} userId=${userId} conversationId=${file.conversationId}`);
+    return this.toSafeFile(file);
+  }
+
+  /**
+   * Deletes a file the caller owns, provided no persisted message references
+   * it: a file attached to a sent message is part of the chat history and
+   * cannot be withdrawn (the reference lives in messages.attached_file_ids).
+   * The row goes first — a database failure aborts the whole delete, so the
+   * record stays retryable — then the object, best effort: a failed object
+   * removal only leaves a logged orphan object, never a database row pointing
+   * at storage that is gone.
+   */
+  async deleteOwned(userId: string, fileId: string): Promise<void> {
+    const file = await this.getOwned(userId, fileId);
+
+    const messagesRepository = this.filesRepository.manager.getRepository(Message);
+    const referenced = await messagesRepository
+      .createQueryBuilder('message')
+      .where('message.conversationId = :conversationId', { conversationId: file.conversationId })
+      .andWhere('message.attachedFileIds @> CAST(:ids AS jsonb)', {
+        ids: JSON.stringify([file.id]),
+      })
+      .getExists();
+    if (referenced) {
+      throw new BadRequestException('این فایل به یک پیام پیوست شده و قابل حذف نیست.');
+    }
+
+    await this.filesRepository.remove(file);
+    await this.storage.remove(file.storageKey);
+    this.logger.log(
+      `file.deleted fileId=${file.id} userId=${userId} conversationId=${file.conversationId} status=${file.status}`,
+    );
   }
 
   /** Admin list with filters; joins user/conversation ids for display. */

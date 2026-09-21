@@ -339,9 +339,11 @@ interface Message {
 | GET | `/conversations/:conversationId/files` | files of one conversation, oldest first (used to restore statuses after a refresh) |
 | GET | `/files/:fileId` | one file — the polling endpoint; foreign file → 404 |
 | GET | `/files/:fileId/content` | owner-only bytes used for thumbnails, the preview viewer and downloads. Images/PDF are `Content-Disposition: inline` (plus `X-Content-Type-Options: nosniff`); everything else, or `?download=1`, is an `attachment`, with the original name echoed as `filename*=UTF-8''…` so non-ASCII names survive. Foreign file → 404, missing object → 404, no token → 401. |
+| DELETE | `/files/:fileId` | owner-only removal of a **draft** attachment (a file no message references): the row and the stored object are both gone, so a refresh cannot resurrect a removed chip. A file already attached to a sent message → 400 (history is immutable); foreign file → 404. **204** on success. |
+| POST | `/files/:fileId/retry` | owner-only retry for a **FAILED** file: `FAILED → PROCESSING` with a fresh job and a reset attempt budget, reusing the same file identity (no duplicate rows). Queue unavailable → 503 and the row is rolled back to FAILED. READY/UPLOADING/PROCESSING → 400; foreign file → 404. Returns the safe file shape. |
 | GET | `/admin/files?status=&limit=&offset=` | **admin** — `{ total, counts: {UPLOADING, PROCESSING, READY, FAILED, total}, items[] }` with user email + conversation title |
 | GET | `/admin/files/stats` | **admin** — `{ counts, queue: { waiting, active, failed, completed } \| null }` |
-| POST | `/admin/files/:fileId/reprocess` | **admin** — the only path from `READY`/`FAILED` back to `PROCESSING`; 400 for any other status |
+| POST | `/admin/files/:fileId/reprocess` | **admin** — the only path from `READY` (and an alternative for `FAILED`) back to `PROCESSING`; 400 for any other status |
 
 Safe file shape (never includes extracted text or the storage key):
 

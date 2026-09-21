@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -35,6 +36,8 @@ const INLINE_PREVIEW_MIMES = new Set(['application/pdf', 'image/png', 'image/jpe
  *   GET  /conversations/:conversationId/files   status list for the chat UI
  *   GET  /files/:fileId                         single status (polling)
  *   GET  /files/:fileId/content                 preview/download (owner-only)
+ *   DELETE /files/:fileId                       remove a draft attachment (owner-only)
+ *   POST /files/:fileId/retry                   retry a FAILED file's processing (owner-only)
  *
  * Upload stores the binary, persists metadata in UPLOADING and enqueues the
  * background job — it never extracts or OCRs synchronously.
@@ -87,6 +90,35 @@ export class FilesController {
   ) {
     // Owner-only; other users' files are 404 (no existence leak).
     return this.filesService.getOwnedSafe(user.id, fileId);
+  }
+
+  /**
+   * Removes a draft attachment (a file no message references yet): the row and
+   * the stored object are both gone, so a refresh cannot resurrect a chip the
+   * user deliberately removed. Files attached to a sent message are rejected
+   * with a 400 — history is immutable.
+   */
+  @Delete('files/:fileId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(
+    @CurrentUser() user: { id: string },
+    @Param('fileId', ParseUUIDPipe) fileId: string,
+  ): Promise<void> {
+    await this.filesService.deleteOwned(user.id, fileId);
+  }
+
+  /**
+   * Owner retry for a FAILED file: FAILED → PROCESSING with a fresh job and a
+   * reset attempt budget, reusing the file identity (no duplicate rows). The
+   * admin reprocess endpoint stays the only path for READY files.
+   */
+  @Post('files/:fileId/retry')
+  @HttpCode(HttpStatus.OK) // an action on an existing resource, not a creation
+  async retry(
+    @CurrentUser() user: { id: string },
+    @Param('fileId', ParseUUIDPipe) fileId: string,
+  ) {
+    return this.filesService.retryProcessing(user.id, fileId);
   }
 
   /**

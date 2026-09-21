@@ -34,3 +34,6 @@ coverage/
 *.traineddata
 
 .captures/
+
+backend/test.png
+test.png
