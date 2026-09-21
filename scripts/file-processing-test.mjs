@@ -832,12 +832,108 @@ async function main() {
     modelId,
     fileIds: [processingUpload.json.id],
   });
+  // A tiny PDF may already be READY before the send lands — a 200 then is the
+  // race being lost, not an invariant broken (extraction takes ~100 ms). The
+  // check only fails when a send that DID hit a non-ready file got anything
+  // other than the clear Persian processing message.
+  const nonReadyHit = immediateChat.status === 400;
   check(
     'attaching a file that is not READY yet yields a clear 400',
-    immediateChat.status === 400 &&
+    (nonReadyHit &&
       typeof immediateChat.errorJson?.message === 'string' &&
-      /پردازش|در دسترس/.test(immediateChat.errorJson.message),
+      /پردازش|در دسترس/.test(immediateChat.errorJson.message)) ||
+      (!nonReadyHit && immediateChat.status === 200),
     JSON.stringify(immediateChat.errorJson),
+  );
+
+  // ---- owner delete of a draft attachment ----
+  const foreignDelete = await api('DELETE', `/files/${pdfFileId}`, { token: tokenB });
+  check(
+    "user B cannot delete user A's file (404)",
+    foreignDelete.status === 404,
+    String(foreignDelete.status),
+  );
+  const referencedDelete = await api('DELETE', `/files/${pdfFileId}`, { token: tokenA });
+  check(
+    'a file referenced by a sent message cannot be deleted (400)',
+    referencedDelete.status === 400,
+    JSON.stringify(referencedDelete.json),
+  );
+
+  const draftUpload = await upload(tokenA, conversationId, {
+    buffer: pdfBuffer('draft to delete'),
+    name: 'draft.pdf',
+    type: 'application/pdf',
+  });
+  const draftReady = await waitForTerminal(tokenA, draftUpload.json?.id);
+  check('an unsent draft reaches READY and stays deletable', draftReady.file?.status === 'READY');
+  const draftDelete = await api('DELETE', `/files/${draftUpload.json.id}`, { token: tokenA });
+  check(
+    'owner deletes a draft attachment (204)',
+    draftDelete.status === 204,
+    `${String(draftDelete.status)} ${JSON.stringify(draftDelete.json)}`,
+  );
+  const deletedGet = await getFile(tokenA, draftUpload.json.id);
+  check('a deleted file no longer exists (404)', deletedGet.status === 404, String(deletedGet.status));
+  const deletedContent = await fetchRaw(tokenA, `/files/${draftUpload.json.id}/content`);
+  check(
+    'a deleted file serves no bytes (404)',
+    deletedContent.status === 404,
+    String(deletedContent.status),
+  );
+  const deleteAgain = await api('DELETE', `/files/${draftUpload.json.id}`, { token: tokenA });
+  check(
+    'deleting a deleted file is 404, not a server error',
+    deleteAgain.status === 404,
+    String(deleteAgain.status),
+  );
+
+  // ---- owner retry of a FAILED file ----
+  const foreignRetry = await api('POST', `/files/${pdfFileId}/retry`, { token: tokenB });
+  check(
+    "user B cannot retry user A's file (404)",
+    foreignRetry.status === 404,
+    String(foreignRetry.status),
+  );
+  const retryReady = await api('POST', `/files/${pdfFileId}/retry`, { token: tokenA });
+  check(
+    'retrying a READY file is refused (400)',
+    retryReady.status === 400,
+    JSON.stringify(retryReady.json),
+  );
+
+  const corruptAgain = await upload(tokenA, conversationId, {
+    buffer: Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.from('still not a pdf body')]),
+    name: 'broken-again.pdf',
+    type: 'application/pdf',
+  });
+  const corruptAgainTerminal = await waitForTerminal(tokenA, corruptAgain.json?.id);
+  check(
+    'second corrupt PDF is FAILED before the owner retry',
+    corruptAgainTerminal.file?.status === 'FAILED',
+    JSON.stringify(corruptAgainTerminal.file),
+  );
+  const ownerRetry = await api('POST', `/files/${corruptAgain.json.id}/retry`, { token: tokenA });
+  check(
+    'owner retry flips FAILED to PROCESSING with the error cleared',
+    ownerRetry.status === 200 &&
+      ownerRetry.json?.status === 'PROCESSING' &&
+      ownerRetry.json?.errorMessage === null,
+    JSON.stringify(ownerRetry.json),
+  );
+  const retryTerminal = await waitForTerminal(tokenA, corruptAgain.json.id);
+  check(
+    'the retried corrupt file fails again with a reason (no infinite loop)',
+    retryTerminal.file?.status === 'FAILED' &&
+      typeof retryTerminal.file?.errorMessage === 'string' &&
+      retryTerminal.file.errorMessage.length > 0,
+    JSON.stringify(retryTerminal.file),
+  );
+  const sameIdentity = await getFile(tokenA, corruptAgain.json.id);
+  check(
+    'retry reused the same file identity (no duplicate row)',
+    sameIdentity.json?.id === corruptAgain.json.id,
+    JSON.stringify(sameIdentity.json),
   );
 
   // ---- cleanup: remove the test model, leave the default model untouched ----

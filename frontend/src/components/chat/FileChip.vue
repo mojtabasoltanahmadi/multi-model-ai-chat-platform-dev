@@ -64,8 +64,23 @@ const state = computed<'queued' | 'working' | 'done' | 'failed'>(() => {
   return 'working';
 });
 
-/** Only a client-side upload failure can be sent again from here. */
-const canRetry = computed(() => props.upload === 'error');
+/**
+ * A retry is offered for either failure stage: a client-side upload failure
+ * can be re-sent from the File still in memory, and a FAILED server status
+ * restarts extraction through the retry API (same file identity). Chips from
+ * history pass no `upload`, so they never render a retry button.
+ */
+const canRetry = computed(
+  () =>
+    props.upload === 'error' ||
+    (props.upload === 'completed' && props.status === 'FAILED'),
+);
+
+const retryLabel = computed(() =>
+  props.upload === 'error'
+    ? `تلاش دوباره برای آپلود ${props.name}`
+    : `تلاش دوباره برای پردازش ${props.name}`,
+);
 
 /**
  * The words live in the tooltip and the accessible name only: the visible chip
@@ -219,8 +234,8 @@ onMounted(() => {
       v-if="canRetry"
       type="button"
       class="file-chip__retry"
-      :aria-label="`تلاش دوباره برای آپلود ${name}`"
-      :title="`تلاش دوباره برای آپلود ${name}`"
+      :aria-label="retryLabel"
+      :title="retryLabel"
       @click="$emit('retry')"
     >
       <svg

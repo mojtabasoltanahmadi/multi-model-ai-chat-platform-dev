@@ -56,7 +56,8 @@ const emit = defineEmits<{
   'update:webSearchEnabled': [enabled: boolean];
   attach: [files: File[]];
   'remove-attachment': [fileId: string];
-  'retry-upload': [fileId: string];
+  /** Retries whichever stage failed for this chip: its upload or its processing. */
+  'retry-attachment': [fileId: string];
   'open-file': [file: ChatFile];
 }>();
 
@@ -201,7 +202,7 @@ defineExpose({ focus: () => textarea.value?.focus() });
           removable
           @open="emit('open-file', file)"
           @remove="emit('remove-attachment', file.id)"
-          @retry="emit('retry-upload', file.id)"
+          @retry="emit('retry-attachment', file.id)"
         />
       </div>
 

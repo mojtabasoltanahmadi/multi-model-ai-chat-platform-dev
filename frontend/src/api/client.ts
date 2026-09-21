@@ -340,6 +340,24 @@ export function fetchChatFile(fileId: string): Promise<ChatFile> {
 }
 
 /**
+ * Deletes a draft attachment: a file no message references yet. Files already
+ * attached to a sent message are rejected by the backend (history is
+ * immutable) and surface here as a thrown ApiError.
+ */
+export function deleteConversationFile(fileId: string): Promise<void> {
+  return api<void>(`/files/${fileId}`, { method: 'DELETE' });
+}
+
+/**
+ * Retries processing of a FAILED file: the backend flips it back to
+ * PROCESSING with a fresh job, reusing the same file identity. Only FAILED
+ * files are accepted — anything else is a 400.
+ */
+export function retryFileProcessing(fileId: string): Promise<ChatFile> {
+  return api<ChatFile>(`/files/${fileId}/retry`, { method: 'POST' });
+}
+
+/**
  * Downloads the stored bytes of a file the caller owns (thumbnails, previews
  * and downloads). The response is binary, so it bypasses `api()`; the JWT is
  * required because MinIO itself is never exposed to the browser.
