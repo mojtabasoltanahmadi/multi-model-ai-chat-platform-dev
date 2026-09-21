@@ -256,17 +256,23 @@ Retries are always bounded (3 attempts); there is no infinite loop.
   Multiple sheets are labeled; an empty sheet renders `(این شیت خالی است)`. A file with no
   sheets or no rows at all is a permanent failure. A workbook-format guard runs before parsing
   because SheetJS would otherwise "successfully" parse arbitrary text as CSV.
-- **Image / OCR** — `tesseract.js` (pure JS, no native dependencies), run inside a dedicated
-  child process so a tesseract crash or hang can never take down (or wedge) the API process.
-  Every attempt has a hard time budget (`OCR_TIMEOUT_MS`, default 90s) after which the child is
-  killed and the attempt fails as transient. Language comes from
-  `OCR_LANGUAGE` (default `eng`); language data downloads on first use and is cached outside the
-  repository (`OCR_CACHE_PATH`, default a temp dir — the directory is created by the backend).
-  Air-gapped installs can point
-  `OCR_DATA_PATH` at a local `tessdata` directory. An image with no recognizable text is a
-  permanent failure; transport-level OCR failures (language-data download) are transient and
-  retried by BullMQ. If OCR cannot run in the environment, the file fails — it is never reported
-  as successfully processed.
+- **Image / OCR** — `tesseract.js` (pure JS, no native deps) with `sharp` preprocessing, run
+  inside a dedicated child process so a tesseract/sharp crash or hang can never take down (or
+  wedge) the API process. Pipeline: size-normalize (upscale <1000px-wide images toward 2000px
+  with a 4× cap, downscale >2400px) → grayscale → contrast normalize → sharpen → PNG, then
+  Tesseract with PSM 6 (single uniform block — robust for documents, screenshots and photos of
+  text; the core default PSM 3 mis-segments sparse UI text). If the primary pass yields (almost)
+  no meaningful characters, exactly ONE fallback pass runs on the same worker: binarized
+  (threshold 160) image + PSM 11 (sparse text); the better result wins. Text cleanup is
+  whitespace-only — Persian/English characters, Persian and Latin digits, URLs and punctuation
+  are never rewritten. Language defaults to `fas+eng` (Persian-first product; `eng` alone reads
+  Persian glyphs as Latin garbage); language data downloads once and is cached (`OCR_CACHE_PATH`,
+  default a temp dir that the backend creates — tesseract never mkdirs it itself); air-gapped
+  installs point `OCR_DATA_PATH` at a local `tessdata` directory. Every attempt has a hard time
+  budget (`OCR_TIMEOUT_MS`, default 90s) after which the child is killed and the attempt fails as
+  transient (BullMQ retries). An image with no recognizable text is a permanent failure;
+  transport-level failures (language-data download) are transient. If OCR cannot run in the
+  environment, the file fails — it is never reported as successfully processed.
 
 ## Chat integration
 
@@ -331,9 +337,10 @@ recoverable without manual SQL.
 | `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | `minioadmin` (dev) | storage credentials |
 | `MINIO_BUCKET` | `chat-files` | bucket, created idempotently at startup |
 | `REDIS_HOST` / `REDIS_PORT` | `localhost` / `6379` | BullMQ broker |
-| `OCR_LANGUAGE` | `eng` | tesseract language(s) |
+| `OCR_LANGUAGE` | `fas+eng` | tesseract language(s) — Persian + English |
 | `OCR_CACHE_PATH` | temp dir | language-data cache location |
 | `OCR_DATA_PATH` | *(empty)* | local `tessdata` dir for air-gapped installs |
+| `OCR_PSM` | `6` | primary Tesseract page-segmentation mode (11 = sparse text fallback is automatic) |
 | `OCR_TIMEOUT_MS` | `90000` | per-attempt OCR time budget; the OCR child process is killed after it |
 
 ## Local development
